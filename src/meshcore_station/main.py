@@ -20,14 +20,17 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
 from .database import Database
+from .diagnostics import system_diagnostics
 from .firmware import FirmwareFlasher
+from .firmware_catalog import download_verified, load_catalog
 from .models import (
     AdvertRequest, BackupImportRequest, ChannelRequest, ContactImportRequest,
     ContactUpdateRequest, DatagramRequest, DeviceSettingsRequest, EncryptedBackupRequest,
     EncryptedRestoreRequest, IdentityBackupRequest, MockIncomingRequest, PathRequest,
-    SendMessageRequest, TraceRequest,
+    SendMessageRequest, TraceRequest, SetupRequest, HistoryPolicyRequest, CatalogFlashRequest,
 )
 from .service import StationService
+from .tls import generate_self_signed_certificate
 from .transports.meshcore_serial import MeshCoreSerialTransport, list_serial_ports
 from .transports.mock import MockTransport
 
@@ -49,7 +52,11 @@ def _valid_basic_authorization(header: str, settings: Settings) -> bool:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
-    database = Database(settings.database_path)
+    database = Database(
+        settings.database_path,
+        packet_limit=settings.packet_history_limit,
+        stats_limit=settings.stats_history_limit,
+    )
     if settings.transport == "serial":
         transport = MeshCoreSerialTransport(settings.serial_port, settings.serial_baud, settings.debug_radio)
     elif settings.transport == "ble":
@@ -64,7 +71,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         transport = MockTransport(seed=settings.mock_seed)
     else:
         raise ValueError("MESHCORE_TRANSPORT должен быть mock, serial или ble")
-    station = StationService(database, transport)
+    station = StationService(
+        database,
+        transport,
+        message_retry_seconds=settings.message_retry_seconds,
+        message_max_attempts=settings.message_max_attempts,
+    )
 
     async def firmware_event(payload: dict) -> None:
         await station.broadcast("firmware", payload)
@@ -78,11 +90,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await station.start()
+        policy = database.get_settings()
+        database.prune_history(
+            int(policy.get("history_days", settings.history_days)),
+            int(policy.get("packet_limit", settings.packet_history_limit)),
+            int(policy.get("stats_limit", settings.stats_history_limit)),
+        )
         yield
         await flasher.close()
         await station.stop()
 
-    app = FastAPI(title="MeshCore Pi Station", version="0.5.1", lifespan=lifespan)
+    app = FastAPI(title="MeshCore Pi Station", version="0.6.0", lifespan=lifespan)
     app.state.station = station
     app.state.settings = settings
     app.state.flasher = flasher
@@ -108,7 +126,75 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/status")
     async def status():
-        return station.status
+        return {**station.status, "version": "0.6.0", "onboarding_complete": bool(database.get_settings().get("onboarding_complete"))}
+
+    @app.get("/api/setup")
+    async def setup_status():
+        return {
+            "complete": bool(database.get_settings().get("onboarding_complete")),
+            "transport": settings.transport,
+            "serial_port": settings.serial_port,
+            "ble_address": settings.ble_address,
+            "serial_ports": list_serial_ports(),
+            "web_username": settings.web_username,
+            "https_enabled": bool(settings.tls_cert and settings.tls_key),
+        }
+
+    @app.post("/api/setup")
+    async def save_setup(request: SetupRequest):
+        if request.serial_port != "auto" and not request.serial_port.startswith("/dev/"):
+            raise HTTPException(400, "USB-порт должен находиться в /dev или иметь значение auto")
+        if request.web_password and len(request.web_password) < 12:
+            raise HTTPException(400, "Пароль должен содержать не менее 12 символов")
+        payload = request.model_dump()
+        if not payload["web_password"]:
+            payload["web_password"] = settings.web_password
+        if request.enable_https:
+            cert, key = await asyncio.to_thread(
+                generate_self_signed_certificate, settings.data_dir / "tls"
+            )
+            payload["tls_cert"], payload["tls_key"] = str(cert), str(key)
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        temporary = settings.runtime_config_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(settings.runtime_config_path)
+        try:
+            settings.runtime_config_path.chmod(0o600)
+        except OSError:
+            pass
+        database.set_setting("onboarding_complete", True)
+        database.set_setting("configured_transport", request.transport)
+        return {
+            "ok": True,
+            "restart_required": True,
+            "transport": request.transport,
+            "serial_port": request.serial_port,
+            "ble_address": request.ble_address,
+            "language": request.language,
+            "web_username": request.web_username,
+            "https_enabled": request.enable_https,
+        }
+
+    @app.get("/api/system/diagnostics")
+    async def diagnostics():
+        return await asyncio.to_thread(system_diagnostics, settings.data_dir, list_serial_ports())
+
+    @app.get("/api/history/policy")
+    async def history_policy():
+        saved = database.get_settings()
+        return {
+            "history_days": int(saved.get("history_days", settings.history_days)),
+            "packet_limit": int(saved.get("packet_limit", settings.packet_history_limit)),
+            "stats_limit": int(saved.get("stats_limit", settings.stats_history_limit)),
+        }
+
+    @app.put("/api/history/policy")
+    async def update_history_policy(request: HistoryPolicyRequest):
+        values = request.model_dump()
+        for key, value in values.items():
+            database.set_setting(key, value)
+        removed = database.prune_history(**values)
+        return {**values, "removed": removed}
 
     @app.get("/api/firmware/status")
     async def firmware_status():
@@ -118,7 +204,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "auth_configured": bool(settings.web_password),
             "ports": list_serial_ports(),
             "max_bytes": 16 * 1024 * 1024,
+            "catalog_configured": bool(settings.firmware_catalog_url),
         }
+
+    @app.get("/api/firmware/catalog")
+    async def firmware_catalog():
+        try:
+            entries = await asyncio.to_thread(load_catalog, settings.firmware_catalog_url)
+            return {"configured": bool(settings.firmware_catalog_url), "firmware": entries}
+        except Exception as exc:
+            raise HTTPException(502, f"Не удалось загрузить каталог: {exc}") from exc
+
+    @app.post("/api/firmware/catalog/flash", status_code=202)
+    async def flash_catalog_firmware(request: CatalogFlashRequest):
+        if not settings.firmware_flash_enabled or not settings.web_password:
+            raise HTTPException(403, "Прошивка требует включённой функции и входа по паролю")
+        if request.confirmation != "HELTEC V4":
+            raise HTTPException(400, "Введите подтверждение HELTEC V4")
+        if request.port != "auto" and not request.port.startswith("/dev/"):
+            raise HTTPException(400, "USB-порт должен находиться в /dev или иметь значение auto")
+        try:
+            catalog = await asyncio.to_thread(load_catalog, settings.firmware_catalog_url)
+            entry = next(item for item in catalog if item["id"] == request.firmware_id)
+        except StopIteration as exc:
+            raise HTTPException(404, "Прошивка отсутствует в доверенном каталоге") from exc
+        except Exception as exc:
+            raise HTTPException(502, f"Не удалось загрузить каталог: {exc}") from exc
+        async with firmware_upload_lock:
+            if flasher.status["busy"]:
+                raise HTTPException(409, "Прошивка уже выполняется")
+            upload_dir = settings.data_dir / "firmware"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            image_path = upload_dir / f"{uuid.uuid4().hex}.bin"
+            try:
+                await asyncio.to_thread(download_verified, entry, image_path)
+                flasher.start(image_path, entry["filename"], entry["mode"], request.port)
+            except Exception as exc:
+                image_path.unlink(missing_ok=True)
+                raise HTTPException(400, f"Проверка прошивки не пройдена: {exc}") from exc
+        return {**flasher.status, "verified_sha256": entry["sha256"]}
 
     @app.post("/api/firmware/flash", status_code=202)
     async def firmware_flash(

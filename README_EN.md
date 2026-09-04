@@ -6,7 +6,7 @@ MeshCore Pi Station turns a Raspberry Pi into a local control station for a Mesh
 
 The application can flash a Heltec V4 over USB from the Settings page. It starts in simulator mode and firmware flashing is disabled by default for safety; enable it after configuring HTTPS and password authentication. Once compatible Companion Firmware is installed, the Heltec can be used over USB or Bluetooth Low Energy.
 
-## Version 0.5.1 features
+## Version 0.6.0 features
 
 - persistent Russian and English interfaces;
 - direct and channel messages with local SQLite history;
@@ -25,6 +25,11 @@ The application can flash a Heltec V4 over USB from the Settings page. It starts
 - USB serial or Bluetooth Low Energy Companion Radio connection;
 - cacheable PWA shell, built-in HTTPS and configurable HTTP Basic authentication.
 - authenticated Heltec V4 USB flashing with live progress in the web interface.
+- first-run setup for USB, BLE, language, password and local HTTPS;
+- persistent outgoing queue with retries and a per-message delivery timeline;
+- Raspberry Pi temperature, uptime, load, disk, database, USB and Bluetooth diagnostics;
+- configurable history retention and database limits;
+- optional trusted firmware catalogs with Heltec V4 and SHA-256 verification.
 
 ## Requirements
 
@@ -39,7 +44,7 @@ The application can flash a Heltec V4 over USB from the Settings page. It starts
 
 ```bash
 sudo apt update
-sudo apt install ./meshcore-pi-station_0.5.1_all.deb
+sudo apt install ./meshcore-pi-station_0.6.0_all.deb
 sudo systemctl status meshcore-pi-station
 ```
 
@@ -130,6 +135,22 @@ MESHCORE_MBTILES_PATH=/var/lib/meshcore-pi-station/maps/region.mbtiles
 
 After restarting, MBTiles takes priority over the online basemap. Do not bulk-download public OpenStreetMap tiles; use a prepared MBTiles database for offline operation.
 
+## Setup wizard and message queue
+
+On first launch, version 0.6.0 asks for the language, USB/BLE/simulator transport, device address, username, password and local HTTPS. The wizard writes `/var/lib/meshcore-pi-station/station.json` with mode `0600`; this file takes priority for wizard-managed values. Delete it to return to `/etc/default/meshcore-pi-station`. Restart the service after changing the transport, password or HTTPS.
+
+When the Companion is unavailable, outgoing messages remain queued in SQLite. The station retries them after reconnection up to `MESHCORE_MESSAGE_MAX_ATTEMPTS` times. Each message card shows its complete delivery timeline and per-attempt error details.
+
+## Trusted firmware catalog
+
+The built-in catalog contains official USB Companion Firmware for the standard Heltec V4. For a custom source, `MESHCORE_FIRMWARE_CATALOG_URL` points to an HTTPS JSON document:
+
+```json
+{"firmware":[{"id":"heltec-v4-1.16","name":"Heltec V4 Companion","version":"1.16.0","board":"heltec-v4","mode":"update","url":"https://example.org/firmware.bin","sha256":"64-character-hex"}]}
+```
+
+Only `heltec-v4` entries are accepted. The station downloads the image to the Raspberry Pi and verifies its size, ESP32 signature and SHA-256 before invoking the protected flashing workflow.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -150,6 +171,12 @@ After restarting, MBTiles takes priority over the online basemap. Do not bulk-do
 | `MESHCORE_TLS_KEY_PASSWORD` | empty | Encrypted TLS key password |
 | `MESHCORE_FIRMWARE_FLASH` | `false` | Enable web-based Heltec firmware flashing |
 | `MESHCORE_FIRMWARE_BAUD` | `460800` | `esptool` write speed |
+| `MESHCORE_FIRMWARE_CATALOG_URL` | `builtin` | Built-in catalog or trusted HTTPS JSON URL; empty disables the catalog |
+| `MESHCORE_MESSAGE_RETRY_SECONDS` | `10` | Outgoing retry interval |
+| `MESHCORE_MESSAGE_MAX_ATTEMPTS` | `5` | Maximum delivery attempts |
+| `MESHCORE_HISTORY_DAYS` | `30` | Message and event retention |
+| `MESHCORE_PACKET_HISTORY_LIMIT` | `10000` | Maximum retained packet events |
+| `MESHCORE_STATS_HISTORY_LIMIT` | `1440` | Maximum retained statistics samples |
 | `MESHCORE_MBTILES_PATH` | empty | Local map database path |
 | `MESHCORE_TILE_URL` | OpenStreetMap | Online fallback without MBTiles |
 

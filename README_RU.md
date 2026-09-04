@@ -6,7 +6,7 @@ MeshCore Pi Station превращает Raspberry Pi в локальную ст
 
 Приложение умеет прошивать Heltec V4 через USB из раздела настроек. По умолчанию станция запускается с симулятором, а функция прошивки отключена из соображений безопасности; её включают после настройки HTTPS и входа по паролю. После установки совместимой Companion Firmware с Heltec можно работать через USB или Bluetooth Low Energy.
 
-## Возможности версии 0.5.1
+## Возможности версии 0.6.0
 
 - русский и английский интерфейс с сохранением выбранного языка;
 - личные и канальные сообщения, локальная история в SQLite;
@@ -28,6 +28,11 @@ MeshCore Pi Station превращает Raspberry Pi в локальную ст
 - подключение Companion Radio по USB serial или Bluetooth Low Energy;
 - встроенный HTTPS и настраиваемая HTTP Basic авторизация.
 - безопасная прошивка Heltec V4 через USB из веб-интерфейса с отображением прогресса.
+- мастер первого запуска для USB, BLE, языка, пароля и локального HTTPS;
+- очередь исходящих сообщений с повторными попытками и подробной шкалой доставки;
+- диагностика Raspberry Pi: температура, uptime, нагрузка, диск, база, USB и Bluetooth;
+- настраиваемые сроки хранения истории и лимиты базы;
+- доверенный каталог прошивок с проверкой платы Heltec V4 и SHA-256.
 
 ## Требования
 
@@ -42,7 +47,7 @@ MeshCore Pi Station превращает Raspberry Pi в локальную ст
 
 ```bash
 sudo apt update
-sudo apt install ./meshcore-pi-station_0.5.1_all.deb
+sudo apt install ./meshcore-pi-station_0.6.0_all.deb
 sudo systemctl status meshcore-pi-station
 ```
 
@@ -133,6 +138,22 @@ MESHCORE_MBTILES_PATH=/var/lib/meshcore-pi-station/maps/region.mbtiles
 
 После перезапуска MBTiles получает приоритет над сетевой подложкой. Не скачивайте публичные тайлы OpenStreetMap массово — для автономной работы используйте заранее подготовленный MBTiles-файл.
 
+## Мастер настройки и очередь сообщений
+
+При первом открытии версия 0.6.0 предлагает выбрать язык, USB/BLE/симулятор, адрес устройства, пользователя, пароль и локальный HTTPS. Настройка сохраняется с правами `0600` в `/var/lib/meshcore-pi-station/station.json` и имеет приоритет для параметров, которыми управляет мастер. Для возврата к `/etc/default/meshcore-pi-station` удалите `station.json`. После изменения транспорта, пароля или HTTPS перезапустите службу.
+
+Если Companion временно отключён, исходящее сообщение сохраняется со статусом «в очереди». После восстановления соединения станция выполняет до `MESHCORE_MESSAGE_MAX_ATTEMPTS` попыток. В карточке сообщения отображается вся шкала состояний и ошибки каждой попытки.
+
+## Доверенный каталог прошивок
+
+Встроенный каталог содержит официальную USB Companion Firmware для обычной Heltec V4. Для собственного источника `MESHCORE_FIRMWARE_CATALOG_URL` указывает на HTTPS JSON-документ следующего формата:
+
+```json
+{"firmware":[{"id":"heltec-v4-1.16","name":"Heltec V4 Companion","version":"1.16.0","board":"heltec-v4","mode":"update","url":"https://example.org/firmware.bin","sha256":"64-символьный-hex"}]}
+```
+
+Станция принимает из каталога только записи для `heltec-v4`, загружает образ на Raspberry Pi, проверяет лимит размера, ESP32-сигнатуру и SHA-256, а затем запускает обычную защищённую процедуру прошивки.
+
 ## Основные параметры
 
 | Переменная | По умолчанию | Назначение |
@@ -153,6 +174,12 @@ MESHCORE_MBTILES_PATH=/var/lib/meshcore-pi-station/maps/region.mbtiles
 | `MESHCORE_TLS_KEY_PASSWORD` | пусто | Пароль зашифрованного TLS-ключа |
 | `MESHCORE_FIRMWARE_FLASH` | `false` | Разрешить прошивку Heltec из веб-интерфейса |
 | `MESHCORE_FIRMWARE_BAUD` | `460800` | Скорость записи через `esptool` |
+| `MESHCORE_FIRMWARE_CATALOG_URL` | `builtin` | Встроенный каталог либо HTTPS-адрес доверенного JSON-каталога; пусто отключает каталог |
+| `MESHCORE_MESSAGE_RETRY_SECONDS` | `10` | Интервал повторной отправки |
+| `MESHCORE_MESSAGE_MAX_ATTEMPTS` | `5` | Максимум попыток доставки |
+| `MESHCORE_HISTORY_DAYS` | `30` | Срок хранения сообщений и событий |
+| `MESHCORE_PACKET_HISTORY_LIMIT` | `10000` | Максимальное число пакетов |
+| `MESHCORE_STATS_HISTORY_LIMIT` | `1440` | Максимальное число отсчётов статистики |
 | `MESHCORE_MBTILES_PATH` | пусто | Путь к локальной карте |
 | `MESHCORE_TILE_URL` | OpenStreetMap | Сетевая подложка при отсутствии MBTiles |
 

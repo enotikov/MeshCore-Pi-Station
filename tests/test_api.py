@@ -234,3 +234,51 @@ def test_valid_firmware_upload_is_queued(tmp_path: Path):
     assert captured == {
         "filename": "companion.bin", "mode": "update", "port": "auto", "magic": b"\xe9"
     }
+
+
+def test_setup_history_and_system_diagnostics(tmp_path: Path):
+    with TestClient(create_app(settings(tmp_path))) as client:
+        setup = client.get("/api/setup").json()
+        assert setup["complete"] is False
+        saved = client.post(
+            "/api/setup",
+            json={
+                "transport": "serial", "serial_port": "auto", "ble_address": "auto",
+                "ble_pin": "", "language": "ru", "web_username": "operator",
+                "web_password": "long-test-password", "enable_https": True,
+            },
+        )
+        assert saved.status_code == 200
+        assert saved.json()["restart_required"] is True
+        assert "web_password" not in saved.json()
+        assert (tmp_path / "station.json").is_file()
+        assert (tmp_path / "tls" / "server.crt").is_file()
+        assert client.get("/api/setup").json()["complete"] is True
+
+        policy = client.put(
+            "/api/history/policy",
+            json={"history_days": 14, "packet_limit": 500, "stats_limit": 120},
+        )
+        assert policy.status_code == 200
+        assert client.get("/api/history/policy").json()["history_days"] == 14
+        diagnostics = client.get("/api/system/diagnostics").json()
+        assert {"platform", "python", "disk", "database_bytes", "serial_ports"} <= diagnostics.keys()
+
+
+def test_message_is_queued_while_radio_is_offline(tmp_path: Path):
+    async def scenario():
+        database = Database(tmp_path / "offline.db")
+        database.initialize()
+        transport = MockTransport(seed=False)
+        station = StationService(database, transport, message_retry_seconds=0.01)
+        queued = await station.send_message("channel", "0", "Store and forward")
+        assert queued["status"] == "queued"
+        assert queued["attempt_count"] == 0
+        transport._connected = True
+        delivered = await station._deliver_message(queued)
+        assert delivered["status"] == "sent"
+        assert delivered["attempt_count"] == 1
+        assert [event["status"] for event in delivered["timeline"]] == ["queued", "sending", "sent"]
+        database.close()
+
+    asyncio.run(scenario())

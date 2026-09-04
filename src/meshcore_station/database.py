@@ -9,7 +9,10 @@ from typing import Any
 
 
 class Database:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, packet_limit: int = 10000, stats_limit: int = 1440):
+        self.path = path
+        self.packet_limit = packet_limit
+        self.stats_limit = stats_limit
         path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
@@ -81,6 +84,17 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_stats_samples_time
                     ON stats_samples(created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS message_status_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_message_status_events_message
+                    ON message_status_events(message_id, created_at, id);
                 """
             )
             columns = {
@@ -101,6 +115,30 @@ class Database:
                     self._connection.execute(
                         f"ALTER TABLE channels ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
                     )
+            message_columns = {
+                row[1] for row in self._connection.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            for name, definition in (
+                ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_attempt", "INTEGER"),
+                ("error", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in message_columns:
+                    self._connection.execute(f"ALTER TABLE messages ADD COLUMN {name} {definition}")
+            interrupted = self._connection.execute(
+                "SELECT id FROM messages WHERE direction='out' AND status='sending'"
+            ).fetchall()
+            if interrupted:
+                timestamp = int(time.time())
+                self._connection.execute(
+                    "UPDATE messages SET status='queued', error='Станция была перезапущена' "
+                    "WHERE direction='out' AND status='sending'"
+                )
+                self._connection.executemany(
+                    "INSERT INTO message_status_events(message_id, status, created_at, detail) "
+                    "VALUES(?, 'queued', ?, 'Станция была перезапущена')",
+                    [(int(row["id"]), timestamp) for row in interrupted],
+                )
 
     def close(self) -> None:
         with self._lock:
@@ -228,6 +266,10 @@ class Database:
                 payload,
             )
             message_id = cursor.lastrowid
+            self._connection.execute(
+                "INSERT INTO message_status_events(message_id, status, created_at) VALUES(?, ?, ?)",
+                (message_id, status, int(created_at or time.time())),
+            )
             if direction == "in" and target_type == "contact":
                 self._connection.execute(
                     "UPDATE contacts SET unread=unread+1 WHERE id=?", (str(target_id),)
@@ -243,15 +285,47 @@ class Database:
             raise KeyError(message_id)
         result = dict(row)
         result["metadata"] = json.loads(result.pop("metadata_json"))
+        result["timeline"] = self.message_timeline(message_id)
         return result
 
-    def update_message(self, message_id: int, status: str, radio_id: str | None = None) -> dict[str, Any]:
+    def update_message(
+        self,
+        message_id: int,
+        status: str,
+        radio_id: str | None = None,
+        *,
+        error: str = "",
+        attempted: bool = False,
+    ) -> dict[str, Any]:
+        timestamp = int(time.time())
         with self._lock, self._connection:
             self._connection.execute(
-                "UPDATE messages SET status=?, radio_id=COALESCE(?, radio_id) WHERE id=?",
-                (status, radio_id, message_id),
+                """UPDATE messages SET status=?, radio_id=COALESCE(?, radio_id), error=?,
+                   attempt_count=attempt_count+?, last_attempt=CASE WHEN ? THEN ? ELSE last_attempt END
+                   WHERE id=?""",
+                (status, radio_id, error, int(attempted), int(attempted), timestamp, message_id),
+            )
+            self._connection.execute(
+                "INSERT INTO message_status_events(message_id, status, created_at, detail) VALUES(?, ?, ?, ?)",
+                (message_id, status, timestamp, error),
             )
         return self.get_message(message_id)
+
+    def message_timeline(self, message_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT status, created_at, detail FROM message_status_events WHERE message_id=? ORDER BY id",
+                (message_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def queued_messages(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id FROM messages WHERE direction='out' AND status='queued' ORDER BY id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self.get_message(int(row["id"])) for row in rows]
 
     def list_messages(self, target_type: str, target_id: str, limit: int = 200) -> list[dict[str, Any]]:
         with self._lock:
@@ -269,6 +343,7 @@ class Database:
         for row in rows:
             item = dict(row)
             item["metadata"] = json.loads(item.pop("metadata_json"))
+            item["timeline"] = self.message_timeline(int(item["id"]))
             result.append(item)
         return result
 
@@ -324,7 +399,8 @@ class Database:
             )
             event_id = int(cursor.lastrowid)
             self._connection.execute(
-                "DELETE FROM packet_events WHERE id NOT IN (SELECT id FROM packet_events ORDER BY id DESC LIMIT 10000)"
+                "DELETE FROM packet_events WHERE id NOT IN (SELECT id FROM packet_events ORDER BY id DESC LIMIT ?)"
+                , (self.packet_limit,)
             )
         return {"id": event_id, "event_type": event_type, "direction": direction,
                 "contact_id": contact_id, "channel_id": channel_id,
@@ -349,8 +425,33 @@ class Database:
                 (int(time.time()), json.dumps(data, ensure_ascii=False)),
             )
             self._connection.execute(
-                "DELETE FROM stats_samples WHERE id NOT IN (SELECT id FROM stats_samples ORDER BY id DESC LIMIT 1440)"
+                "DELETE FROM stats_samples WHERE id NOT IN (SELECT id FROM stats_samples ORDER BY id DESC LIMIT ?)"
+                , (self.stats_limit,)
             )
+
+    def prune_history(self, history_days: int, packet_limit: int, stats_limit: int) -> dict[str, int]:
+        cutoff = int(time.time()) - history_days * 86400
+        self.packet_limit = packet_limit
+        self.stats_limit = stats_limit
+        with self._lock, self._connection:
+            before_messages = self._connection.total_changes
+            self._connection.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
+            removed_messages = self._connection.total_changes - before_messages
+            before_packets = self._connection.total_changes
+            self._connection.execute("DELETE FROM packet_events WHERE created_at < ?", (cutoff,))
+            self._connection.execute(
+                "DELETE FROM packet_events WHERE id NOT IN (SELECT id FROM packet_events ORDER BY id DESC LIMIT ?)",
+                (packet_limit,),
+            )
+            removed_packets = self._connection.total_changes - before_packets
+            before_stats = self._connection.total_changes
+            self._connection.execute("DELETE FROM stats_samples WHERE created_at < ?", (cutoff,))
+            self._connection.execute(
+                "DELETE FROM stats_samples WHERE id NOT IN (SELECT id FROM stats_samples ORDER BY id DESC LIMIT ?)",
+                (stats_limit,),
+            )
+            removed_stats = self._connection.total_changes - before_stats
+        return {"messages": removed_messages, "packets": removed_packets, "stats": removed_stats}
 
     def list_stats_samples(self, limit: int = 120) -> list[dict[str, Any]]:
         with self._lock:

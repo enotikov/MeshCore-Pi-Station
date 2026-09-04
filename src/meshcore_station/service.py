@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from fastapi import WebSocket
@@ -18,19 +19,26 @@ class StationService:
         database: Database,
         transport: RadioTransport,
         reconnect_interval: float = 5.0,
+        message_retry_seconds: float = 10.0,
+        message_max_attempts: int = 5,
     ):
         self.database = database
         self.transport = transport
         self.reconnect_interval = reconnect_interval
+        self.message_retry_seconds = message_retry_seconds
+        self.message_max_attempts = message_max_attempts
         self._sockets: set[WebSocket] = set()
         self._state: dict[str, Any] = {"connected": False, "starting": True}
         self._lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
         self._reconnect_task: asyncio.Task[None] | None = None
         self._stats_task: asyncio.Task[None] | None = None
+        self._queue_task: asyncio.Task[None] | None = None
         self._last_stats: dict[str, Any] = {}
         self._maintenance = False
         self._maintenance_lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
+        self._connection_attempt = 0
 
     @property
     def status(self) -> dict[str, Any]:
@@ -44,13 +52,22 @@ class StationService:
                 self._reconnect_loop(), name="meshcore-radio-reconnect"
             )
         self._stats_task = asyncio.create_task(self._stats_loop(), name="meshcore-stats")
+        self._queue_task = asyncio.create_task(self._queue_loop(), name="meshcore-message-queue")
 
     async def _connect(self) -> bool:
-        self._state = {"starting": True, "connected": False, "error": None}
+        self._connection_attempt += 1
+        self._state = {
+            "starting": True, "connected": False, "connection_state": "connecting",
+            "connection_attempt": self._connection_attempt, "error": None,
+        }
         try:
             await self.transport.start(self._on_transport_event)
             await self.sync()
-            self._state = {"starting": False, "error": None}
+            self._state = {
+                "starting": False, "connection_state": "connected", "connection_attempt": 0,
+                "connected_at": int(time.time()), "error": None,
+            }
+            self._connection_attempt = 0
             await self.broadcast("status", self.status)
             return True
         except Exception as exc:
@@ -59,7 +76,10 @@ class StationService:
                 await self.transport.stop()
             except Exception:
                 logger.exception("Unable to clean up failed radio transport")
-            self._state = {"starting": False, "connected": False, "error": str(exc)}
+            self._state = {
+                "starting": False, "connected": False, "connection_state": "retrying",
+                "connection_attempt": self._connection_attempt, "error": str(exc),
+            }
             await self.broadcast("status", self.status)
             return False
 
@@ -106,10 +126,10 @@ class StationService:
 
     async def stop(self) -> None:
         self._stop_event.set()
-        for task in (self._reconnect_task, self._stats_task):
+        for task in (self._reconnect_task, self._stats_task, self._queue_task):
             if task:
                 task.cancel()
-        for task in (self._reconnect_task, self._stats_task):
+        for task in (self._reconnect_task, self._stats_task, self._queue_task):
             if not task:
                 continue
             try:
@@ -118,6 +138,7 @@ class StationService:
                 pass
         self._reconnect_task = None
         self._stats_task = None
+        self._queue_task = None
         await self.transport.stop()
         self.database.close()
 
@@ -142,6 +163,18 @@ class StationService:
     async def get_device_info(self) -> dict[str, Any]:
         return await self.transport.device_info()
 
+    async def _queue_loop(self) -> None:
+        while not self._stop_event.is_set():
+            if self.status.get("connected") and not self._maintenance:
+                for message in self.database.queued_messages():
+                    await self._deliver_message(message)
+                    if not self.status.get("connected"):
+                        break
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self.message_retry_seconds)
+            except TimeoutError:
+                pass
+
     async def update_device(self, values: dict[str, Any]) -> dict[str, Any]:
         result = await self.transport.update_device(values)
         await self.broadcast("status", self.status)
@@ -160,30 +193,45 @@ class StationService:
             target_id=target_id,
             direction="out",
             text=text,
-            status="sending",
+            status="queued",
         )
         await self.broadcast("message", message)
-        try:
-            if target_type == "contact":
-                contact = self.database.get_contact(target_id)
-                if contact and contact.get("blocked"):
-                    raise RuntimeError("Контакт заблокирован")
-            result = await self.transport.send_message(target_type, target_id, text)
-            message = self.database.update_message(
-                message["id"], result.get("status", "sent"), result.get("radio_id")
+        if not self.status.get("connected") or self._maintenance:
+            return message
+        return await self._deliver_message(message)
+
+    async def _deliver_message(self, message: dict[str, Any]) -> dict[str, Any]:
+        async with self._send_lock:
+            message = self.database.get_message(int(message["id"]))
+            if message["status"] != "queued":
+                return message
+            message = self.database.update_message(message["id"], "sending", attempted=True)
+            await self.broadcast("message", message)
+            target_type = str(message["target_type"])
+            target_id = str(message["target_id"])
+            try:
+                if target_type == "contact":
+                    contact = self.database.get_contact(target_id)
+                    if contact and contact.get("blocked"):
+                        raise RuntimeError("Контакт заблокирован")
+                result = await self.transport.send_message(target_type, target_id, str(message["text"]))
+                message = self.database.update_message(
+                    message["id"], result.get("status", "sent"), result.get("radio_id")
+                )
+            except Exception as exc:
+                terminal = int(message.get("attempt_count", 0)) >= self.message_max_attempts
+                message = self.database.update_message(
+                    message["id"], "failed" if terminal else "queued", error=str(exc)
+                )
+            await self.broadcast("message", message)
+            packet = self.database.add_packet_event(
+                "message", direction="out",
+                contact_id=target_id if target_type == "contact" else None,
+                channel_id=target_id if target_type == "channel" else None,
+                data=message,
             )
-        except Exception as exc:
-            message = self.database.update_message(message["id"], "failed")
-            message["error"] = str(exc)
-        await self.broadcast("message", message)
-        packet = self.database.add_packet_event(
-            "message", direction="out",
-            contact_id=target_id if target_type == "contact" else None,
-            channel_id=target_id if target_type == "channel" else None,
-            data=message,
-        )
-        await self.broadcast("packet", packet)
-        return message
+            await self.broadcast("packet", packet)
+            return message
 
     async def _on_transport_event(self, event: TransportEvent) -> None:
         if event.type == "message":
@@ -221,6 +269,9 @@ class StationService:
             contact = self.database.upsert_contact(event.payload)
             await self.broadcast("contact", contact)
         elif event.type == "status":
+            connected = bool(self.transport.status.get("connected"))
+            self._state["connection_state"] = "connected" if connected else "disconnected"
+            self._state["connected"] = connected
             await self.broadcast("status", self.status)
         else:
             packet = self.database.add_packet_event(event.type, data=event.payload)

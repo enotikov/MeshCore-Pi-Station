@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 — 2026-09-05
+
+- Added a first-run wizard for USB, BLE, language, password and local HTTPS setup.
+- Added persistent outgoing-message queuing with retry limits and delivery timelines.
+- Added explicit reconnect states and connection-attempt diagnostics.
+- Added Raspberry Pi health diagnostics for temperature, uptime, load, disk, database, USB and Bluetooth.
+- Added configurable history retention and immediate pruning from the web interface.
+- Added a built-in trusted catalog for official MeshCore 1.17.1 Heltec V4 USB Companion images, with board filtering and mandatory SHA-256 verification.
+- Added database migrations that preserve existing 0.5.x data.
+
 ## 0.5.1 — 2026-09-04
 
 - Corrected the RU/EN guides to state that authenticated Heltec V4 USB flashing is supported.

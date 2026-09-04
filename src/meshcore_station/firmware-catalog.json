@@ -1,0 +1,22 @@
+{
+  "firmware": [
+    {
+      "id": "heltec-v4-usb-companion-1.17.1-update",
+      "name": "Heltec V4 USB Companion",
+      "version": "1.17.1",
+      "board": "heltec-v4",
+      "mode": "update",
+      "url": "https://github.com/meshcore-dev/MeshCore/releases/download/companion-v1.17.1/heltec_v4_companion_radio_usb-v1.17.1-d929643.bin",
+      "sha256": "c97c949663e594563a0f4725bdc573c0c2e28927e1f70e90cec68ec3d47277be"
+    },
+    {
+      "id": "heltec-v4-usb-companion-1.17.1-full",
+      "name": "Heltec V4 USB Companion — full recovery",
+      "version": "1.17.1",
+      "board": "heltec-v4",
+      "mode": "full",
+      "url": "https://github.com/meshcore-dev/MeshCore/releases/download/companion-v1.17.1/heltec_v4_companion_radio_usb-v1.17.1-d929643-merged.bin",
+      "sha256": "67ef59c7687787255c23659e7525b81c1fc88bf679521f4183099a50580d0a3d"
+    }
+  ]
+}

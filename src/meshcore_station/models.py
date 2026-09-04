@@ -89,3 +89,26 @@ class DatagramRequest(BaseModel):
     data_type: int = Field(ge=1, le=0xFFFF)
     payload_hex: str = Field(pattern="^(?:[0-9a-fA-F]{2}){1,163}$")
     flood: bool = True
+
+
+class SetupRequest(BaseModel):
+    transport: Literal["mock", "serial", "ble"]
+    serial_port: str = Field("auto", min_length=1, max_length=256)
+    ble_address: str = Field("auto", min_length=1, max_length=64)
+    ble_pin: str = Field("", max_length=64)
+    language: Literal["ru", "en"] = "ru"
+    web_username: str = Field("meshcore", min_length=1, max_length=64)
+    web_password: str = Field("", max_length=256)
+    enable_https: bool = False
+
+
+class HistoryPolicyRequest(BaseModel):
+    history_days: int = Field(30, ge=1, le=3650)
+    packet_limit: int = Field(10000, ge=100, le=1_000_000)
+    stats_limit: int = Field(1440, ge=60, le=100_000)
+
+
+class CatalogFlashRequest(BaseModel):
+    firmware_id: str = Field(min_length=1, max_length=128)
+    port: str = Field("auto", min_length=1, max_length=256)
+    confirmation: str
