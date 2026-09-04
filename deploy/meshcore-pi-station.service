@@ -1,0 +1,25 @@
+[Unit]
+Description=MeshCore Pi Station
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meshcore
+Group=meshcore
+SupplementaryGroups=dialout
+WorkingDirectory=/var/lib/meshcore-pi-station
+EnvironmentFile=-/etc/default/meshcore-pi-station
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/meshcore-pi-station/.venv/bin/meshcore-pi-station
+Restart=always
+RestartSec=3
+StateDirectory=meshcore-pi-station
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/meshcore-pi-station
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+{
+  "name": "MeshCore Pi Station",
+  "short_name": "Pi Station",
+  "start_url": "/?lang=en",
+  "display": "standalone",
+  "background_color": "#08120f",
+  "theme_color": "#10251f",
+  "lang": "en",
+  "description": "Local MeshCore station for Raspberry Pi and a USB Companion Radio",
+  "scope": "/",
+  "shortcuts": [
+    {"name": "Monitor", "url": "/?lang=en#monitor"},
+    {"name": "Map", "url": "/?lang=en#map"}
+  ],
+  "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+}

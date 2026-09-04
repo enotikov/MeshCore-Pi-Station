@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project
+        run: pip install -e '.[dev]'
+      - name: Run tests
+        run: pytest -q
+      - name: Check JavaScript
+        run: node --check src/meshcore_station/static/app.js
+      - name: Build Debian package
+        if: matrix.python-version == '3.11'
+        run: python scripts/build_deb.py
+      - name: Upload Debian package
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: meshcore-pi-station-deb
+          path: |
+            dist/*.deb
+            dist/*.sha256
