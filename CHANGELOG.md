@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 — 2026-09-04
+
+- Added authenticated Heltec V4 firmware flashing from the Settings page.
+- Added safe handling for regular application images at `0x10000` and merged images at `0x0`.
+- Added USB-port discovery, ESP image validation, upload size limits and explicit confirmation.
+- Added background flashing progress and automatic Companion reconnection.
+- Added `esptool` to the Raspberry Pi package.
+
 ## 0.4.0 — 2026-09-04
 
 - Added Bluetooth Low Energy transport with automatic discovery, explicit address and optional pairing PIN.

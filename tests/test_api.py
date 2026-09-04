@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from meshcore_station.config import Settings
 from meshcore_station.main import create_app
 from meshcore_station.database import Database
+from meshcore_station.firmware import build_esptool_commands
 from meshcore_station.service import StationService
 from meshcore_station.transports.meshcore_serial import MeshCoreSerialTransport
 from meshcore_station.transports.mock import MockTransport
@@ -30,6 +31,8 @@ def settings(tmp_path: Path) -> Settings:
         tls_cert=None,
         tls_key=None,
         tls_key_password="",
+        firmware_flash_enabled=False,
+        firmware_flash_baud=460800,
         mbtiles_path=None,
         tile_url="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
     )
@@ -185,3 +188,49 @@ def test_ble_transport_status():
     assert transport.status["mode"] == "ble"
     assert transport.status["port"] == "auto"
     assert transport.status["baud"] is None
+
+
+def test_firmware_flash_is_disabled_by_default(tmp_path: Path):
+    with TestClient(create_app(settings(tmp_path))) as client:
+        status = client.get("/api/firmware/status").json()
+        assert status["enabled"] is False
+        response = client.post(
+            "/api/firmware/flash?filename=firmware.bin&mode=update&port=auto",
+            content=b"\xe9" + b"\0" * 4095,
+            headers={"X-Flash-Confirmation": "HELTEC V4"},
+        )
+        assert response.status_code == 403
+
+
+def test_esptool_commands_use_safe_heltec_v4_offsets(tmp_path: Path):
+    image = tmp_path / "firmware.bin"
+    update = build_esptool_commands("/dev/ttyACM0", image, "update", 460800)
+    full = build_esptool_commands("/dev/ttyACM0", image, "full", 460800)
+    assert update[-1][-2] == "0x10000"
+    assert full[0][-1] == "erase_flash"
+    assert full[-1][-2] == "0x0"
+
+
+def test_valid_firmware_upload_is_queued(tmp_path: Path):
+    configured = replace(
+        settings(tmp_path), firmware_flash_enabled=True, web_password="secret"
+    )
+    app = create_app(configured)
+    captured = {}
+
+    def fake_start(image, filename, mode, port):
+        captured.update(filename=filename, mode=mode, port=port, magic=image.read_bytes()[:1])
+        image.unlink()
+
+    app.state.flasher.start = fake_start
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/firmware/flash?filename=companion.bin&mode=update&port=auto",
+            content=b"\xe9" + b"\0" * 4095,
+            headers={"X-Flash-Confirmation": "HELTEC V4"},
+            auth=("meshcore", "secret"),
+        )
+    assert response.status_code == 202
+    assert captured == {
+        "filename": "companion.bin", "mode": "update", "port": "auto", "magic": b"\xe9"
+    }

@@ -29,6 +29,8 @@ class StationService:
         self._reconnect_task: asyncio.Task[None] | None = None
         self._stats_task: asyncio.Task[None] | None = None
         self._last_stats: dict[str, Any] = {}
+        self._maintenance = False
+        self._maintenance_lock = asyncio.Lock()
 
     @property
     def status(self) -> dict[str, Any]:
@@ -74,6 +76,33 @@ class StationService:
             if await self._connect():
                 return
             delay = min(delay * 2, 60.0)
+
+    async def pause_radio(self, reason: str) -> None:
+        async with self._maintenance_lock:
+            self._maintenance = True
+            if self._reconnect_task:
+                self._reconnect_task.cancel()
+                try:
+                    await self._reconnect_task
+                except asyncio.CancelledError:
+                    pass
+                self._reconnect_task = None
+            await self.transport.stop()
+            self._state = {
+                "starting": False, "connected": False, "maintenance": reason, "error": None
+            }
+            await self.broadcast("status", self.status)
+
+    async def resume_radio(self) -> None:
+        async with self._maintenance_lock:
+            if not self._maintenance or self._stop_event.is_set():
+                return
+            self._maintenance = False
+            self._state.pop("maintenance", None)
+            if not await self._connect():
+                self._reconnect_task = asyncio.create_task(
+                    self._reconnect_loop(), name="meshcore-radio-reconnect"
+                )
 
     async def stop(self) -> None:
         self._stop_event.set()

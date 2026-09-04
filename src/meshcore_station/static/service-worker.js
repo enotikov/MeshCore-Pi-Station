@@ -1,4 +1,4 @@
-const CACHE = "meshcore-pi-station-v12";
+const CACHE = "meshcore-pi-station-v13";
 const SHELL = ["/", "/static/styles.css?v=12", "/static/app.js?v=12", "/static/icon.svg", "/static/manifest.json", "/static/manifest.en.json"];
 
 self.addEventListener("install", event => {

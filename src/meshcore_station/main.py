@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import csv
 import io
@@ -7,6 +8,7 @@ import json
 import os
 import secrets
 import sqlite3
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlencode
@@ -18,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
 from .database import Database
+from .firmware import FirmwareFlasher
 from .models import (
     AdvertRequest, BackupImportRequest, ChannelRequest, ContactImportRequest,
     ContactUpdateRequest, DatagramRequest, DeviceSettingsRequest, EncryptedBackupRequest,
@@ -25,7 +28,7 @@ from .models import (
     SendMessageRequest, TraceRequest,
 )
 from .service import StationService
-from .transports.meshcore_serial import MeshCoreSerialTransport
+from .transports.meshcore_serial import MeshCoreSerialTransport, list_serial_ports
 from .transports.mock import MockTransport
 
 
@@ -63,15 +66,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         raise ValueError("MESHCORE_TRANSPORT должен быть mock, serial или ble")
     station = StationService(database, transport)
 
+    async def firmware_event(payload: dict) -> None:
+        await station.broadcast("firmware", payload)
+
+    flasher = FirmwareFlasher(
+        station, settings.data_dir, settings.serial_port,
+        baud=settings.firmware_flash_baud, callback=firmware_event,
+    )
+    firmware_upload_lock = asyncio.Lock()
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await station.start()
         yield
+        await flasher.close()
         await station.stop()
 
-    app = FastAPI(title="MeshCore Pi Station", version="0.4.0", lifespan=lifespan)
+    app = FastAPI(title="MeshCore Pi Station", version="0.5.0", lifespan=lifespan)
     app.state.station = station
     app.state.settings = settings
+    app.state.flasher = flasher
 
     @app.middleware("http")
     async def optional_basic_auth(request: Request, call_next):
@@ -95,6 +109,67 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/status")
     async def status():
         return station.status
+
+    @app.get("/api/firmware/status")
+    async def firmware_status():
+        return {
+            **flasher.status,
+            "enabled": settings.firmware_flash_enabled,
+            "auth_configured": bool(settings.web_password),
+            "ports": list_serial_ports(),
+            "max_bytes": 16 * 1024 * 1024,
+        }
+
+    @app.post("/api/firmware/flash", status_code=202)
+    async def firmware_flash(
+        request: Request,
+        filename: str = Query(min_length=1, max_length=180),
+        mode: str = Query(pattern="^(update|full)$"),
+        port: str = Query(default="auto", min_length=1, max_length=256),
+    ):
+        if not settings.firmware_flash_enabled:
+            raise HTTPException(403, "Прошивка отключена в конфигурации станции")
+        if not settings.web_password:
+            raise HTTPException(403, "Для прошивки необходимо включить вход по паролю")
+        if request.headers.get("x-flash-confirmation") != "HELTEC V4":
+            raise HTTPException(400, "Введите подтверждение HELTEC V4")
+        safe_name = Path(filename).name
+        lower_name = safe_name.lower()
+        if not lower_name.endswith(".bin"):
+            raise HTTPException(400, "Поддерживаются только ESP32-S3 .bin образы")
+        merged = lower_name.endswith("merged.bin")
+        if mode == "full" and not merged:
+            raise HTTPException(400, "Для полной прошивки выберите файл *merged.bin")
+        if mode == "update" and merged:
+            raise HTTPException(400, "Merged-образ необходимо прошивать в полном режиме")
+        if port != "auto" and not port.startswith("/dev/"):
+            raise HTTPException(400, "USB-порт должен находиться в /dev или иметь значение auto")
+
+        async with firmware_upload_lock:
+            if flasher.status["busy"]:
+                raise HTTPException(409, "Прошивка уже выполняется")
+            upload_dir = settings.data_dir / "firmware"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            image_path = upload_dir / f"{uuid.uuid4().hex}.bin"
+            size = 0
+            try:
+                with image_path.open("wb") as output:
+                    async for chunk in request.stream():
+                        size += len(chunk)
+                        if size > 16 * 1024 * 1024:
+                            raise HTTPException(413, "Размер прошивки превышает 16 MiB")
+                        output.write(chunk)
+                if size < 4096:
+                    raise HTTPException(400, "Файл прошивки слишком мал")
+                with image_path.open("rb") as image:
+                    if image.read(1) != b"\xe9":
+                        raise HTTPException(400, "Файл не похож на ESP32 image")
+                flasher.start(image_path, safe_name, mode, port)
+            except Exception:
+                if not flasher.status["busy"]:
+                    image_path.unlink(missing_ok=True)
+                raise
+        return flasher.status
 
     @app.get("/api/contacts")
     async def contacts():

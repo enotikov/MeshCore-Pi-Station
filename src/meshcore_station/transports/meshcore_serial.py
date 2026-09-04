@@ -10,12 +10,17 @@ from .base import EventHandler, RadioTransport, TransportEvent
 logger = logging.getLogger(__name__)
 
 
-def resolve_serial_port(configured: str) -> str:
-    if configured != "auto":
-        return configured
+def list_serial_ports() -> list[str]:
     candidates: list[str] = []
     for pattern in ("/dev/serial/by-id/*", "/dev/ttyACM*", "/dev/ttyUSB*"):
         candidates.extend(sorted(glob.glob(pattern)))
+    return list(dict.fromkeys(candidates))
+
+
+def resolve_serial_port(configured: str) -> str:
+    if configured != "auto":
+        return configured
+    candidates = list_serial_ports()
     if not candidates:
         raise RuntimeError("MeshCore USB-модем не найден")
     return candidates[0]

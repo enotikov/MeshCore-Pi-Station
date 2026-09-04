@@ -7,7 +7,7 @@
   <title>MeshCore Pi Station</title>
   <link rel="manifest" id="manifest-link" href="/static/manifest.json">
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/styles.css?v=12">
+  <link rel="stylesheet" href="/static/styles.css?v=13">
 </head>
 <body>
   <div class="shell">
@@ -38,6 +38,7 @@
         <section class="panel form-panel"><div class="panel-head"><div><h2>Каналы</h2><p>Ключи раскрываются только при экспорте.</p></div><button class="primary" id="new-channel">Добавить</button></div><div id="channel-manager" class="manager-list"></div></section>
         <section class="panel form-panel"><div class="panel-head"><div><h2>Импорт контакта</h2><p>Поддерживается официальный meshcore:// URI.</p></div></div><form id="contact-import-form" class="inline-form"><input id="contact-uri" placeholder="meshcore://contact/add?…"><button class="primary">Импорт</button></form><button class="secondary" id="share-self">Показать QR моей станции</button></section>
         <section class="panel form-panel"><div class="panel-head"><div><h2>Данные и уведомления</h2><p>Локальная история, backup и системные уведомления.</p></div></div><div class="button-row"><button class="primary" id="encrypted-backup">Зашифрованный backup</button><button class="secondary" id="identity-backup">Backup identity</button><a class="secondary button" href="/api/backup" download>Открытый JSON</a><a class="secondary button" href="/api/messages.csv" download>История CSV</a><button class="secondary" id="restore-button">Восстановить</button><button class="secondary" id="notification-button">Включить уведомления</button><input id="restore-file" type="file" accept="application/json,.mcps" hidden></div><p class="warning">Предпочитайте зашифрованный backup: он защищает секреты каналов паролем AES-256-GCM. Identity содержит приватный ключ узла.</p></section>
+        <section class="panel form-panel firmware-panel"><div class="panel-head"><div><h2>Прошивка Heltec V4</h2><p id="firmware-capabilities">Проверка готовности…</p></div></div><form id="firmware-form" class="firmware-form"><label class="wide">Файл прошивки <input name="firmware" type="file" accept=".bin,application/octet-stream" required></label><label>Режим <select name="mode"><option value="update">Обновление — адрес 0x10000</option><option value="full">Полная — merged.bin, очистка flash</option></select></label><label>USB-порт <input name="port" value="auto" list="firmware-ports" placeholder="auto"><datalist id="firmware-ports"></datalist></label><label class="wide">Подтверждение <input name="confirmation" autocomplete="off" placeholder="Введите HELTEC V4" required></label><button class="danger wide" id="firmware-submit" type="submit">Прошить Heltec</button></form><div class="firmware-progress"><progress id="firmware-progress" max="100" value="0"></progress><div><strong id="firmware-stage">Ожидание</strong><span id="firmware-message">Выберите совместимый ESP32-S3 образ.</span></div></div><p class="warning">Во время прошивки не отключайте USB и питание. Обычный .bin обновляется без очистки по адресу 0x10000; файл *merged.bin записывается с адреса 0x0 после полной очистки.</p></section>
       </div></section>
     </main>
   </div>
@@ -46,6 +47,6 @@
   <dialog id="contact-dialog"><div class="dialog-head"><strong id="contact-dialog-title">Контакт</strong><button data-close>×</button></div><div class="detail-body" id="contact-detail"></div></dialog>
   <dialog id="channel-dialog"><div class="dialog-head"><strong>Канал</strong><button data-close>×</button></div><form id="channel-form" class="dialog-form"><label>Слот <input name="id" type="number" min="0" max="255" required></label><label>Название <input name="name" maxlength="32" required></label><label>Секрет, 32 hex <input name="secret" pattern="[0-9a-fA-F]{32}" placeholder="Пусто — создать из имени"></label><label>Region scope <input name="region_scope" maxlength="64"></label><button class="primary">Сохранить</button></form></dialog>
   <dialog id="share-dialog"><div class="dialog-head"><strong>MeshCore QR</strong><button data-close>×</button></div><div class="share-body"><img id="share-qr" alt="QR-код"><textarea id="share-uri" readonly></textarea><button class="primary" id="copy-uri">Копировать</button></div></dialog>
-  <div class="toast" id="toast"></div><script src="/static/app.js?v=12" defer></script>
+  <div class="toast" id="toast"></div><script src="/static/app.js?v=13" defer></script>
 </body>
 </html>

@@ -6,7 +6,7 @@ MeshCore Pi Station превращает Raspberry Pi в локальную ст
 
 Приложение пока не прошивает Heltec и по умолчанию запускается с симулятором. Реальный USB- или BLE-модем включается отдельно после установки подходящей Companion Firmware на Heltec V4.
 
-## Возможности версии 0.4.0
+## Возможности версии 0.5.0
 
 - русский и английский интерфейс с сохранением выбранного языка;
 - личные и канальные сообщения, локальная история в SQLite;
@@ -27,6 +27,7 @@ MeshCore Pi Station превращает Raspberry Pi в локальную ст
 - PWA-оболочка, продолжающая открываться без интернета;
 - подключение Companion Radio по USB serial или Bluetooth Low Energy;
 - встроенный HTTPS и настраиваемая HTTP Basic авторизация.
+- безопасная прошивка Heltec V4 через USB из веб-интерфейса с отображением прогресса.
 
 ## Требования
 
@@ -41,7 +42,7 @@ MeshCore Pi Station превращает Raspberry Pi в локальную ст
 
 ```bash
 sudo apt update
-sudo apt install ./meshcore-pi-station_0.4.0_all.deb
+sudo apt install ./meshcore-pi-station_0.5.0_all.deb
 sudo systemctl status meshcore-pi-station
 ```
 
@@ -67,6 +68,22 @@ sudo journalctl -u meshcore-pi-station -f
 ```
 
 Служебный пользователь `meshcore` автоматически добавляется в группу `dialout`.
+
+## Прошивка Heltec V4 через веб-интерфейс
+
+Функция по умолчанию отключена. Сначала включите HTTPS и вход по паролю, затем добавьте в `/etc/default/meshcore-pi-station`:
+
+```text
+MESHCORE_FIRMWARE_FLASH=true
+MESHCORE_FIRMWARE_BAUD=460800
+```
+
+Перезапустите службу и откройте «Настройки → Прошивка Heltec V4». Подключите плату к Raspberry Pi по USB-кабелю с линиями данных, выберите файл и введите точное подтверждение `HELTEC V4`.
+
+- Обычный `*.bin` — режим «Обновление», запись приложения по адресу `0x10000` без очистки пользовательских данных.
+- `*merged.bin` — режим «Полная», очистка flash и запись полного образа с адреса `0x0`.
+
+Станция принимает только файлы до 16 MiB с сигнатурой ESP image. Перед записью она освобождает serial-порт, запускает `esptool`, показывает прогресс и затем автоматически пытается снова подключиться к Companion. Не отключайте питание или USB во время операции. Всегда проверяйте, что образ собран именно для Heltec V4 / ESP32-S3; приложение не может определить разводку платы по содержимому файла.
 
 ## Подключение Bluetooth Companion Radio
 
@@ -134,6 +151,8 @@ MESHCORE_MBTILES_PATH=/var/lib/meshcore-pi-station/maps/region.mbtiles
 | `MESHCORE_TLS_CERT` | пусто | PEM-сертификат HTTPS |
 | `MESHCORE_TLS_KEY` | пусто | Закрытый PEM-ключ HTTPS |
 | `MESHCORE_TLS_KEY_PASSWORD` | пусто | Пароль зашифрованного TLS-ключа |
+| `MESHCORE_FIRMWARE_FLASH` | `false` | Разрешить прошивку Heltec из веб-интерфейса |
+| `MESHCORE_FIRMWARE_BAUD` | `460800` | Скорость записи через `esptool` |
 | `MESHCORE_MBTILES_PATH` | пусто | Путь к локальной карте |
 | `MESHCORE_TILE_URL` | OpenStreetMap | Сетевая подложка при отсутствии MBTiles |
 

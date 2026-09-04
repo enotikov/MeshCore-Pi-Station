@@ -105,7 +105,8 @@ Installed-Size: {installed_size}
 Homepage: https://github.com/enotikov/MeshCore-Pi-Station
 Description: Bilingual Raspberry Pi web companion for MeshCore radios
  Provides chats, packet monitoring, radio configuration, geographic maps,
- telemetry and diagnostics over USB serial or Bluetooth Low Energy.
+ telemetry, diagnostics and Heltec V4 firmware flashing over USB serial,
+ plus Bluetooth Low Energy connectivity.
 """
     control_tar = make_tar({"control": (control.encode(), 0o644), "conffiles": (b"/etc/default/meshcore-pi-station\n", 0o644), "postinst": (postinst.encode(), 0o755), "prerm": (prerm.encode(), 0o755), "postrm": (postrm.encode(), 0o755)})
     with tempfile.TemporaryDirectory() as temporary:

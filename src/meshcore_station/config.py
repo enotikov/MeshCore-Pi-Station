@@ -28,6 +28,8 @@ class Settings:
     tls_cert: Path | None
     tls_key: Path | None
     tls_key_password: str
+    firmware_flash_enabled: bool
+    firmware_flash_baud: int
     mbtiles_path: Path | None
     tile_url: str
 
@@ -55,6 +57,8 @@ class Settings:
             tls_key=Path(os.environ["MESHCORE_TLS_KEY"]).expanduser()
             if os.getenv("MESHCORE_TLS_KEY") else None,
             tls_key_password=os.getenv("MESHCORE_TLS_KEY_PASSWORD", ""),
+            firmware_flash_enabled=_as_bool(os.getenv("MESHCORE_FIRMWARE_FLASH")),
+            firmware_flash_baud=int(os.getenv("MESHCORE_FIRMWARE_BAUD", "460800")),
             mbtiles_path=Path(os.environ["MESHCORE_MBTILES_PATH"]).expanduser()
             if os.getenv("MESHCORE_MBTILES_PATH") else None,
             tile_url=os.getenv(

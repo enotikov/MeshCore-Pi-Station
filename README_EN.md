@@ -6,7 +6,7 @@ MeshCore Pi Station turns a Raspberry Pi into a local control station for a Mesh
 
 The application does not flash the Heltec board. It starts with a simulator by default; real USB or BLE mode can be enabled later, after a compatible Companion Firmware has been installed on the Heltec V4.
 
-## Version 0.4.0 features
+## Version 0.5.0 features
 
 - persistent Russian and English interfaces;
 - direct and channel messages with local SQLite history;
@@ -24,6 +24,7 @@ The application does not flash the Heltec board. It starts with a simulator by d
 - AES-256-GCM backups, protected identity export and CSV export;
 - USB serial or Bluetooth Low Energy Companion Radio connection;
 - cacheable PWA shell, built-in HTTPS and configurable HTTP Basic authentication.
+- authenticated Heltec V4 USB flashing with live progress in the web interface.
 
 ## Requirements
 
@@ -38,7 +39,7 @@ The application does not flash the Heltec board. It starts with a simulator by d
 
 ```bash
 sudo apt update
-sudo apt install ./meshcore-pi-station_0.4.0_all.deb
+sudo apt install ./meshcore-pi-station_0.5.0_all.deb
 sudo systemctl status meshcore-pi-station
 ```
 
@@ -64,6 +65,22 @@ sudo journalctl -u meshcore-pi-station -f
 ```
 
 The `meshcore` service account is automatically added to the `dialout` group.
+
+## Flash Heltec V4 from the web interface
+
+Flashing is disabled by default. Enable HTTPS and password authentication first, then add this to `/etc/default/meshcore-pi-station`:
+
+```text
+MESHCORE_FIRMWARE_FLASH=true
+MESHCORE_FIRMWARE_BAUD=460800
+```
+
+Restart the service and open “Settings → Flash Heltec V4”. Connect the board to the Raspberry Pi with a USB data cable, choose the firmware and enter the exact confirmation `HELTEC V4`.
+
+- A regular `*.bin` uses Update mode and writes the application at `0x10000` without erasing user data.
+- A `*merged.bin` uses Full mode, erases flash and writes the complete image from `0x0`.
+
+The station accepts ESP images up to 16 MiB, releases the serial port, runs `esptool`, reports progress and reconnects to the Companion afterwards. Do not disconnect USB or power during this operation. Always verify that the image targets Heltec V4 / ESP32-S3; board pin mapping cannot be identified from the image alone.
 
 ## Connect a Bluetooth Companion Radio
 
@@ -131,6 +148,8 @@ After restarting, MBTiles takes priority over the online basemap. Do not bulk-do
 | `MESHCORE_TLS_CERT` | empty | HTTPS PEM certificate |
 | `MESHCORE_TLS_KEY` | empty | HTTPS PEM private key |
 | `MESHCORE_TLS_KEY_PASSWORD` | empty | Encrypted TLS key password |
+| `MESHCORE_FIRMWARE_FLASH` | `false` | Enable web-based Heltec firmware flashing |
+| `MESHCORE_FIRMWARE_BAUD` | `460800` | `esptool` write speed |
 | `MESHCORE_MBTILES_PATH` | empty | Local map database path |
 | `MESHCORE_TILE_URL` | OpenStreetMap | Online fallback without MBTiles |
 
