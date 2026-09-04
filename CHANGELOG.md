@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 — 2026-09-04
+
+- Corrected the RU/EN guides to state that authenticated Heltec V4 USB flashing is supported.
+- Clarified that installation itself does not modify the board and flashing is an explicit, opt-in operation.
+
 ## 0.5.0 — 2026-09-04
 
 - Added authenticated Heltec V4 firmware flashing from the Settings page.

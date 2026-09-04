@@ -82,7 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await flasher.close()
         await station.stop()
 
-    app = FastAPI(title="MeshCore Pi Station", version="0.5.0", lifespan=lifespan)
+    app = FastAPI(title="MeshCore Pi Station", version="0.5.1", lifespan=lifespan)
     app.state.station = station
     app.state.settings = settings
     app.state.flasher = flasher

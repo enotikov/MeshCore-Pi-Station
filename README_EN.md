@@ -4,9 +4,9 @@
 
 MeshCore Pi Station turns a Raspberry Pi into a local control station for a MeshCore Companion Radio connected over USB or Bluetooth Low Energy. The interface can be opened from a computer, phone, or the Raspberry Pi display. No cloud messaging service is required.
 
-The application does not flash the Heltec board. It starts with a simulator by default; real USB or BLE mode can be enabled later, after a compatible Companion Firmware has been installed on the Heltec V4.
+The application can flash a Heltec V4 over USB from the Settings page. It starts in simulator mode and firmware flashing is disabled by default for safety; enable it after configuring HTTPS and password authentication. Once compatible Companion Firmware is installed, the Heltec can be used over USB or Bluetooth Low Energy.
 
-## Version 0.5.0 features
+## Version 0.5.1 features
 
 - persistent Russian and English interfaces;
 - direct and channel messages with local SQLite history;
@@ -39,11 +39,11 @@ The application does not flash the Heltec board. It starts with a simulator by d
 
 ```bash
 sudo apt update
-sudo apt install ./meshcore-pi-station_0.5.0_all.deb
+sudo apt install ./meshcore-pi-station_0.5.1_all.deb
 sudo systemctl status meshcore-pi-station
 ```
 
-Open `http://<raspberry-pi-ip>:8080`; use `hostname -I` to find the address. The service initially uses its simulator, so it can be verified before connecting or flashing the Heltec.
+Open `http://<raspberry-pi-ip>:8080`; use `hostname -I` to find the address. The service initially uses its simulator, so it can be verified without a Heltec. Configure protected access and enable flashing as described below when you are ready to install firmware.
 
 ## Connect a USB Companion Radio
 

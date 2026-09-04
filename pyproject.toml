@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "meshcore-pi-station"
-version = "0.5.0"
+version = "0.5.1"
 description = "Raspberry Pi web companion for a MeshCore USB or Bluetooth radio"
 readme = "README.md"
 requires-python = ">=3.11"
