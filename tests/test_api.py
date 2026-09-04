@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -8,6 +9,7 @@ from meshcore_station.config import Settings
 from meshcore_station.main import create_app
 from meshcore_station.database import Database
 from meshcore_station.service import StationService
+from meshcore_station.transports.meshcore_serial import MeshCoreSerialTransport
 from meshcore_station.transports.mock import MockTransport
 
 
@@ -19,9 +21,15 @@ def settings(tmp_path: Path) -> Settings:
         transport="mock",
         serial_port="auto",
         serial_baud=115200,
+        ble_address="auto",
+        ble_pin="",
         debug_radio=False,
         mock_seed=True,
+        web_username="meshcore",
         web_password="",
+        tls_cert=None,
+        tls_key=None,
+        tls_key_password="",
         mbtiles_path=None,
         tile_url="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
     )
@@ -162,15 +170,18 @@ def test_management_and_diagnostics_api(tmp_path: Path):
 
 
 def test_optional_basic_auth(tmp_path: Path):
-    protected = settings(tmp_path)
-    protected = Settings(
-        host=protected.host, port=protected.port, data_dir=protected.data_dir,
-        transport=protected.transport, serial_port=protected.serial_port,
-        serial_baud=protected.serial_baud, debug_radio=protected.debug_radio,
-        mock_seed=protected.mock_seed, web_password="secret", mbtiles_path=None,
-        tile_url=protected.tile_url,
-    )
+    protected = replace(settings(tmp_path), web_username="operator", web_password="secret")
     with TestClient(create_app(protected)) as client:
         assert client.get("/api/status").status_code == 401
         assert client.get("/api/status", auth=("meshcore", "wrong")).status_code == 401
-        assert client.get("/api/status", auth=("meshcore", "secret")).status_code == 200
+        assert client.get("/api/status", auth=("meshcore", "secret")).status_code == 401
+        response = client.get("/api/status", auth=("operator", "secret"))
+        assert response.status_code == 200
+        assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_ble_transport_status():
+    transport = MeshCoreSerialTransport("auto", mode="ble", ble_pin="123456")
+    assert transport.status["mode"] == "ble"
+    assert transport.status["port"] == "auto"
+    assert transport.status["baud"] is None

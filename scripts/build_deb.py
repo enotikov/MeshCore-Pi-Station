@@ -20,6 +20,12 @@ def add_tree(archive: tarfile.TarFile, source: Path, destination: str) -> None:
     for path in [source, *sorted(source.rglob("*"))]:
         target = Path(destination, path.relative_to(source)).as_posix()
         info = archive.gettarinfo(str(path), arcname=target)
+        if path.is_dir():
+            info.mode = 0o755
+        elif path.suffix == ".sh":
+            info.mode = 0o755
+        else:
+            info.mode = 0o644
         info.uid = info.gid = 0
         info.uname = info.gname = "root"
         if path.is_file():
@@ -93,19 +99,20 @@ Section: net
 Priority: optional
 Architecture: all
 Essential: no
-Depends: python3 (>= 3.11), python3-venv, python3-pip, adduser
+Depends: python3 (>= 3.11), python3-venv, python3-pip, adduser, bluez, openssl
 Maintainer: MeshCore Pi Station contributors
 Installed-Size: {installed_size}
-Homepage: https://github.com/enotikov/heltec-v4-web-monitor
-Description: Bilingual Raspberry Pi web companion for MeshCore USB radios
+Homepage: https://github.com/enotikov/MeshCore-Pi-Station
+Description: Bilingual Raspberry Pi web companion for MeshCore radios
  Provides chats, packet monitoring, radio configuration, geographic maps,
- telemetry and diagnostics for a MeshCore Companion Radio connected over USB.
+ telemetry and diagnostics over USB serial or Bluetooth Low Energy.
 """
     control_tar = make_tar({"control": (control.encode(), 0o644), "conffiles": (b"/etc/default/meshcore-pi-station\n", 0o644), "postinst": (postinst.encode(), 0o755), "prerm": (prerm.encode(), 0o755), "postrm": (postrm.encode(), 0o755)})
     with tempfile.TemporaryDirectory() as temporary:
         app = Path(temporary) / "app"
         app.mkdir()
         shutil.copytree(ROOT / "src", app / "src", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copytree(ROOT / "scripts", app / "scripts", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         for name in ("pyproject.toml", "README.md", "README_RU.md", "README_EN.md", "CHANGELOG.md", "LICENSE"):
             shutil.copy2(ROOT / name, app / name)
         data_files = {"lib/systemd/system/meshcore-pi-station.service": ((ROOT / "deploy/meshcore-pi-station.service").read_bytes(), 0o644), "etc/default/meshcore-pi-station": ((ROOT / "deploy/meshcore-pi-station.default").read_bytes(), 0o640)}

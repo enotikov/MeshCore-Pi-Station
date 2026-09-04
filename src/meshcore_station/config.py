@@ -19,9 +19,15 @@ class Settings:
     transport: str
     serial_port: str
     serial_baud: int
+    ble_address: str
+    ble_pin: str
     debug_radio: bool
     mock_seed: bool
+    web_username: str
     web_password: str
+    tls_cert: Path | None
+    tls_key: Path | None
+    tls_key_password: str
     mbtiles_path: Path | None
     tile_url: str
 
@@ -38,9 +44,17 @@ class Settings:
             transport=os.getenv("MESHCORE_TRANSPORT", "mock").strip().lower(),
             serial_port=os.getenv("MESHCORE_SERIAL_PORT", "auto").strip(),
             serial_baud=int(os.getenv("MESHCORE_SERIAL_BAUD", "115200")),
+            ble_address=os.getenv("MESHCORE_BLE_ADDRESS", "auto").strip(),
+            ble_pin=os.getenv("MESHCORE_BLE_PIN", ""),
             debug_radio=_as_bool(os.getenv("MESHCORE_RADIO_DEBUG")),
             mock_seed=_as_bool(os.getenv("MESHCORE_MOCK_SEED"), True),
+            web_username=os.getenv("MESHCORE_WEB_USERNAME", "meshcore"),
             web_password=os.getenv("MESHCORE_WEB_PASSWORD", ""),
+            tls_cert=Path(os.environ["MESHCORE_TLS_CERT"]).expanduser()
+            if os.getenv("MESHCORE_TLS_CERT") else None,
+            tls_key=Path(os.environ["MESHCORE_TLS_KEY"]).expanduser()
+            if os.getenv("MESHCORE_TLS_KEY") else None,
+            tls_key_password=os.getenv("MESHCORE_TLS_KEY_PASSWORD", ""),
             mbtiles_path=Path(os.environ["MESHCORE_MBTILES_PATH"]).expanduser()
             if os.getenv("MESHCORE_MBTILES_PATH") else None,
             tile_url=os.getenv(

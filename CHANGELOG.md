@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 — 2026-09-04
+
+- Added Bluetooth Low Energy transport with automatic discovery, explicit address and optional pairing PIN.
+- Added configurable web username and password authentication for HTTP and WebSocket connections.
+- Added native HTTPS startup with configurable PEM certificate, private key and encrypted-key password.
+- Added a self-signed TLS certificate generator and security response headers.
+- Added BlueZ and OpenSSL to the Raspberry Pi Debian package requirements.
+
 ## 0.3.0 — 2026-09-04
 
 - Added Russian and English web interfaces with persistent language selection.

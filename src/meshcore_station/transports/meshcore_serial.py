@@ -28,10 +28,22 @@ class MeshCoreSerialTransport(RadioTransport):
     database and tests can run before the Heltec companion firmware is ready.
     """
 
-    def __init__(self, port: str, baud: int = 115200, debug: bool = False):
+    def __init__(
+        self,
+        port: str,
+        baud: int = 115200,
+        debug: bool = False,
+        *,
+        mode: str = "serial",
+        ble_pin: str | None = None,
+    ):
+        if mode not in {"serial", "ble"}:
+            raise ValueError("Transport mode must be serial or ble")
         self._configured_port = port
         self._baud = baud
         self._debug = debug
+        self._mode = mode
+        self._ble_pin = ble_pin
         self._port: str | None = None
         self._mc: Any = None
         self._handler: EventHandler | None = None
@@ -41,10 +53,10 @@ class MeshCoreSerialTransport(RadioTransport):
     @property
     def status(self) -> dict[str, Any]:
         return {
-            "mode": "serial",
+            "mode": self._mode,
             "connected": bool(self._mc and self._mc.is_connected),
             "port": self._port or self._configured_port,
-            "baud": self._baud,
+            "baud": self._baud if self._mode == "serial" else None,
             "device": self._device,
         }
 
@@ -52,16 +64,27 @@ class MeshCoreSerialTransport(RadioTransport):
         from meshcore import EventType, MeshCore
 
         self._handler = handler
-        self._port = resolve_serial_port(self._configured_port)
-        self._mc = await MeshCore.create_serial(
-            self._port,
-            self._baud,
-            debug=self._debug,
-            auto_reconnect=True,
-            max_reconnect_attempts=0,
-        )
+        if self._mode == "serial":
+            self._port = resolve_serial_port(self._configured_port)
+            self._mc = await MeshCore.create_serial(
+                self._port,
+                self._baud,
+                debug=self._debug,
+                auto_reconnect=True,
+                max_reconnect_attempts=0,
+            )
+        else:
+            address = None if self._configured_port.lower() in {"", "auto"} else self._configured_port
+            self._port = address or "auto"
+            self._mc = await MeshCore.create_ble(
+                address=address,
+                pin=self._ble_pin or None,
+                debug=self._debug,
+                auto_reconnect=True,
+                max_reconnect_attempts=0,
+            )
         if self._mc is None:
-            raise RuntimeError(f"Нет ответа Companion Firmware на {self._port}")
+            raise RuntimeError(f"Нет ответа MeshCore Companion на {self._port}")
 
         async def on_private(event: Any) -> None:
             payload = event.payload or {}

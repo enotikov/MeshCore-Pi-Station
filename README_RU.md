@@ -2,11 +2,11 @@
 
 ## Назначение
 
-MeshCore Pi Station превращает Raspberry Pi в локальную станцию управления MeshCore Companion Radio, подключённым по USB. Интерфейс открывается в браузере компьютера, телефона или экрана самого Raspberry Pi. Облачный сервис для обмена сообщениями не требуется.
+MeshCore Pi Station превращает Raspberry Pi в локальную станцию управления MeshCore Companion Radio, подключённым по USB или Bluetooth Low Energy. Интерфейс открывается в браузере компьютера, телефона или экрана самого Raspberry Pi. Облачный сервис для обмена сообщениями не требуется.
 
-Приложение пока не прошивает Heltec и по умолчанию запускается с симулятором. Режим реального USB-модема включается отдельно после установки подходящей Companion Firmware на Heltec V4.
+Приложение пока не прошивает Heltec и по умолчанию запускается с симулятором. Реальный USB- или BLE-модем включается отдельно после установки подходящей Companion Firmware на Heltec V4.
 
-## Возможности версии 0.3.0
+## Возможности версии 0.4.0
 
 - русский и английский интерфейс с сохранением выбранного языка;
 - личные и канальные сообщения, локальная история в SQLite;
@@ -25,7 +25,8 @@ MeshCore Pi Station превращает Raspberry Pi в локальную ст
 - advert, WebSocket-обновления и системные уведомления браузера;
 - AES-256-GCM backup, отдельный защищённый экспорт identity и CSV;
 - PWA-оболочка, продолжающая открываться без интернета;
-- необязательная HTTP Basic авторизация.
+- подключение Companion Radio по USB serial или Bluetooth Low Energy;
+- встроенный HTTPS и настраиваемая HTTP Basic авторизация.
 
 ## Требования
 
@@ -34,13 +35,13 @@ MeshCore Pi Station превращает Raspberry Pi в локальную ст
 - Python 3.11 или новее;
 - сетевое подключение во время первой установки Python-зависимостей;
 - свободный порт TCP 8080;
-- для реального радио: Heltec V4 с USB Companion Firmware и USB-кабель с линиями данных.
+- для реального радио: Heltec V4 с Companion Firmware, USB-кабель с линиями данных либо рабочий BLE.
 
 ## Установка готового `.deb`
 
 ```bash
 sudo apt update
-sudo apt install ./meshcore-pi-station_0.3.0_all.deb
+sudo apt install ./meshcore-pi-station_0.4.0_all.deb
 sudo systemctl status meshcore-pi-station
 ```
 
@@ -67,6 +68,44 @@ sudo journalctl -u meshcore-pi-station -f
 
 Служебный пользователь `meshcore` автоматически добавляется в группу `dialout`.
 
+## Подключение Bluetooth Companion Radio
+
+Убедитесь, что Bluetooth работает и найдите устройство:
+
+```bash
+sudo systemctl enable --now bluetooth
+bluetoothctl scan on
+```
+
+Затем задайте в `/etc/default/meshcore-pi-station`:
+
+```text
+MESHCORE_TRANSPORT=ble
+MESHCORE_BLE_ADDRESS=auto
+MESHCORE_BLE_PIN=
+```
+
+`auto` ищет устройство с именем MeshCore. Для однозначного выбора укажите MAC-адрес, например `AA:BB:CC:DD:EE:FF`. PIN нужен только если его требует Companion Firmware. После изменения перезапустите службу. Если Bluetooth-модуль Heltec аппаратно неисправен, используйте USB serial.
+
+## HTTPS и вход по логину/паролю
+
+Создайте самоподписанный сертификат для локальной сети:
+
+```bash
+sudo /usr/lib/meshcore-pi-station/scripts/generate_tls.sh
+```
+
+В `/etc/default/meshcore-pi-station` задайте:
+
+```text
+MESHCORE_WEB_USERNAME=operator
+MESHCORE_WEB_PASSWORD=замените-на-длинный-уникальный-пароль
+MESHCORE_TLS_CERT=/var/lib/meshcore-pi-station/tls/server.crt
+MESHCORE_TLS_KEY=/var/lib/meshcore-pi-station/tls/server.key
+```
+
+После `sudo systemctl restart meshcore-pi-station` откройте `https://<IP-Raspberry-Pi>:8080`. Браузер предупредит о самоподписанном сертификате; для доверенного HTTPS укажите сертификат и ключ от вашего центра сертификации. Если пароль пуст, проверка входа отключена. Сертификат и ключ должны быть указаны вместе.
+
 ## Офлайн-карта
 
 Поместите MBTiles, например, в `/var/lib/meshcore-pi-station/maps/region.mbtiles` и задайте:
@@ -82,13 +121,19 @@ MESHCORE_MBTILES_PATH=/var/lib/meshcore-pi-station/maps/region.mbtiles
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `MESHCORE_HOST` | `0.0.0.0` | Адрес веб-сервера |
-| `MESHCORE_PORT` | `8080` | HTTP-порт |
+| `MESHCORE_PORT` | `8080` | HTTP- или HTTPS-порт |
 | `MESHCORE_DATA_DIR` | `/var/lib/meshcore-pi-station` | SQLite и данные |
-| `MESHCORE_TRANSPORT` | `mock` | `mock` или `serial` |
+| `MESHCORE_TRANSPORT` | `mock` | `mock`, `serial` или `ble` |
 | `MESHCORE_SERIAL_PORT` | `auto` | Автопоиск USB-порта или явный путь |
 | `MESHCORE_SERIAL_BAUD` | `115200` | Скорость USB serial |
+| `MESHCORE_BLE_ADDRESS` | `auto` | Автопоиск BLE или MAC-адрес Heltec |
+| `MESHCORE_BLE_PIN` | пусто | Необязательный PIN BLE-сопряжения |
 | `MESHCORE_RADIO_DEBUG` | `false` | Диагностический лог транспорта |
-| `MESHCORE_WEB_PASSWORD` | пусто | Пароль пользователя `meshcore` |
+| `MESHCORE_WEB_USERNAME` | `meshcore` | Имя пользователя веб-интерфейса |
+| `MESHCORE_WEB_PASSWORD` | пусто | Пароль; пустое значение отключает вход |
+| `MESHCORE_TLS_CERT` | пусто | PEM-сертификат HTTPS |
+| `MESHCORE_TLS_KEY` | пусто | Закрытый PEM-ключ HTTPS |
+| `MESHCORE_TLS_KEY_PASSWORD` | пусто | Пароль зашифрованного TLS-ключа |
 | `MESHCORE_MBTILES_PATH` | пусто | Путь к локальной карте |
 | `MESHCORE_TILE_URL` | OpenStreetMap | Сетевая подложка при отсутствии MBTiles |
 
@@ -96,7 +141,7 @@ MESHCORE_MBTILES_PATH=/var/lib/meshcore-pi-station/maps/region.mbtiles
 
 ## Безопасность
 
-Приложение предназначено для доверенной локальной сети. Не публикуйте порт 8080 напрямую в интернет. Для авторизации задайте `MESHCORE_WEB_PASSWORD=длинный-уникальный-пароль`; пользователь — `meshcore`. Для удалённого доступа рекомендуется VPN или HTTPS reverse proxy. Identity содержит приватный ключ узла — храните экспорт отдельно.
+Не публикуйте приложение в интернет без HTTPS и пароля. Для локального самоподписанного сертификата используйте поставляемый генератор, а для публичного имени — доверенный сертификат. HTTP Basic передаёт учётные данные безопасно только внутри TLS. Identity содержит приватный ключ узла — храните экспорт отдельно.
 
 ## Обновление, удаление и диагностика
 

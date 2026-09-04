@@ -29,15 +29,38 @@ from .transports.meshcore_serial import MeshCoreSerialTransport
 from .transports.mock import MockTransport
 
 
+def _valid_basic_authorization(header: str, settings: Settings) -> bool:
+    if not settings.web_password:
+        return True
+    try:
+        scheme, encoded = header.split(" ", 1)
+        if scheme.lower() != "basic":
+            return False
+        username, password = base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)
+        return secrets.compare_digest(username, settings.web_username) and secrets.compare_digest(
+            password, settings.web_password
+        )
+    except (ValueError, UnicodeDecodeError):
+        return False
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     database = Database(settings.database_path)
     if settings.transport == "serial":
         transport = MeshCoreSerialTransport(settings.serial_port, settings.serial_baud, settings.debug_radio)
+    elif settings.transport == "ble":
+        transport = MeshCoreSerialTransport(
+            settings.ble_address,
+            settings.serial_baud,
+            settings.debug_radio,
+            mode="ble",
+            ble_pin=settings.ble_pin,
+        )
     elif settings.transport == "mock":
         transport = MockTransport(seed=settings.mock_seed)
     else:
-        raise ValueError("MESHCORE_TRANSPORT должен быть mock или serial")
+        raise ValueError("MESHCORE_TRANSPORT должен быть mock, serial или ble")
     station = StationService(database, transport)
 
     @asynccontextmanager
@@ -46,7 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await station.stop()
 
-    app = FastAPI(title="MeshCore Pi Station", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="MeshCore Pi Station", version="0.4.0", lifespan=lifespan)
     app.state.station = station
     app.state.settings = settings
 
@@ -54,18 +77,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def optional_basic_auth(request: Request, call_next):
         if not settings.web_password:
             return await call_next(request)
-        auth = request.headers.get("authorization", "")
-        valid = False
-        if auth.lower().startswith("basic "):
-            try:
-                userpass = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
-                username, password = userpass.split(":", 1)
-                valid = secrets.compare_digest(username, "meshcore") and secrets.compare_digest(password, settings.web_password)
-            except Exception:
-                valid = False
-        if not valid:
+        if not _valid_basic_authorization(request.headers.get("authorization", ""), settings):
             return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="MeshCore Pi Station"'})
-        return await call_next(request)
+        response = await call_next(request)
+        return response
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        return response
 
     @app.get("/api/status")
     async def status():
@@ -379,14 +404,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.websocket("/ws")
     async def websocket(socket: WebSocket):
         if settings.web_password:
-            auth = socket.headers.get("authorization", "")
-            try:
-                userpass = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
-                username, password = userpass.split(":", 1)
-                valid = secrets.compare_digest(username, "meshcore") and secrets.compare_digest(password, settings.web_password)
-            except Exception:
-                valid = False
-            if not valid:
+            if not _valid_basic_authorization(socket.headers.get("authorization", ""), settings):
                 await socket.close(code=1008)
                 return
         await station.add_socket(socket)
@@ -416,7 +434,21 @@ app = create_app()
 
 def run() -> None:
     settings = Settings.from_env()
-    uvicorn.run("meshcore_station.main:app", host=settings.host, port=settings.port)
+    if settings.web_password and not settings.web_username:
+        raise RuntimeError("MESHCORE_WEB_USERNAME не может быть пустым при включённом пароле")
+    if bool(settings.tls_cert) != bool(settings.tls_key):
+        raise RuntimeError("MESHCORE_TLS_CERT и MESHCORE_TLS_KEY должны быть заданы вместе")
+    for path in (settings.tls_cert, settings.tls_key):
+        if path and not path.is_file():
+            raise RuntimeError(f"Файл TLS не найден: {path}")
+    uvicorn.run(
+        "meshcore_station.main:app",
+        host=settings.host,
+        port=settings.port,
+        ssl_certfile=str(settings.tls_cert) if settings.tls_cert else None,
+        ssl_keyfile=str(settings.tls_key) if settings.tls_key else None,
+        ssl_keyfile_password=settings.tls_key_password or None,
+    )
 
 
 if __name__ == "__main__":

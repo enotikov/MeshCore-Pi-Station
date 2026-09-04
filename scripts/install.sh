@@ -23,7 +23,7 @@ getent group dialout >/dev/null 2>&1 && usermod -aG dialout meshcore
 
 install -d -m 0755 "$APP_DIR" /opt/meshcore-pi-station
 install -d -o meshcore -g meshcore -m 0750 "$DATA_DIR" "$DATA_DIR/maps"
-cp -a "$SOURCE_DIR/src" "$SOURCE_DIR/pyproject.toml" "$SOURCE_DIR/README.md" "$SOURCE_DIR/README_RU.md" "$SOURCE_DIR/README_EN.md" "$SOURCE_DIR/LICENSE" "$APP_DIR/"
+cp -a "$SOURCE_DIR/src" "$SOURCE_DIR/scripts" "$SOURCE_DIR/pyproject.toml" "$SOURCE_DIR/README.md" "$SOURCE_DIR/README_RU.md" "$SOURCE_DIR/README_EN.md" "$SOURCE_DIR/LICENSE" "$APP_DIR/"
 
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install --disable-pip-version-check --upgrade pip

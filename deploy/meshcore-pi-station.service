@@ -1,6 +1,6 @@
 [Unit]
 Description=MeshCore Pi Station
-After=network-online.target
+After=network-online.target bluetooth.target
 Wants=network-online.target
 
 [Service]
