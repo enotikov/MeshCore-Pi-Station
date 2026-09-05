@@ -39,6 +39,7 @@ class Settings:
     history_days: int = 30
     packet_history_limit: int = 10000
     stats_history_limit: int = 1440
+    config_file: Path | None = None
 
     @property
     def database_path(self) -> Path:
@@ -46,7 +47,7 @@ class Settings:
 
     @property
     def runtime_config_path(self) -> Path:
-        return self.data_dir / "station.json"
+        return self.config_file or self.data_dir / "station.json"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -65,6 +66,7 @@ class Settings:
             return runtime.get(key, os.getenv(env_name, default))
 
         return cls(
+            config_file=config_path,
             host=os.getenv("MESHCORE_HOST", "0.0.0.0"),
             port=int(os.getenv("MESHCORE_PORT", "8080")),
             data_dir=data_dir,

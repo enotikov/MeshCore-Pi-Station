@@ -7,6 +7,7 @@ class SendMessageRequest(BaseModel):
     target_type: Literal["contact", "channel"]
     target_id: str = Field(min_length=1, max_length=128)
     text: str = Field(min_length=1, max_length=160)
+    ttl_seconds: int = Field(86400, ge=60, le=604800)
 
 
 class MockIncomingRequest(SendMessageRequest):
@@ -77,7 +78,7 @@ class EncryptedBackupRequest(BaseModel):
 
 
 class EncryptedRestoreRequest(EncryptedBackupRequest):
-    payload_base64: str = Field(min_length=32)
+    payload_base64: str = Field(min_length=32, max_length=32 * 1024 * 1024)
 
 
 class IdentityBackupRequest(EncryptedBackupRequest):

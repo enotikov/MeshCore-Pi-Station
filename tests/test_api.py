@@ -3,7 +3,7 @@ import base64
 from dataclasses import replace
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as BaseTestClient
 
 from meshcore_station.config import Settings
 from meshcore_station.main import create_app
@@ -12,6 +12,17 @@ from meshcore_station.firmware import build_esptool_commands
 from meshcore_station.service import StationService
 from meshcore_station.transports.meshcore_serial import MeshCoreSerialTransport
 from meshcore_station.transports.mock import MockTransport
+
+
+class TestClient(BaseTestClient):
+    __test__ = False
+
+    def __enter__(self):
+        result = super().__enter__()
+        configured = self.app.state.settings
+        if not configured.web_password:
+            self.auth = (configured.web_username, (configured.data_dir / "setup-token").read_text().strip())
+        return result
 
 
 def settings(tmp_path: Path) -> Settings:
@@ -253,6 +264,7 @@ def test_setup_history_and_system_diagnostics(tmp_path: Path):
         assert "web_password" not in saved.json()
         assert (tmp_path / "station.json").is_file()
         assert (tmp_path / "tls" / "server.crt").is_file()
+        client.auth = ("operator", "long-test-password")
         assert client.get("/api/setup").json()["complete"] is True
 
         policy = client.put(

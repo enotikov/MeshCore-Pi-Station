@@ -58,6 +58,6 @@ def test_interrupted_send_is_recovered_after_restart(tmp_path: Path):
     reopened = Database(path)
     reopened.initialize()
     recovered = reopened.get_message(message["id"])
-    assert recovered["status"] == "queued"
+    assert recovered["status"] == "unconfirmed"
     assert recovered["timeline"][-1]["detail"] == "Станция была перезапущена"
     reopened.close()

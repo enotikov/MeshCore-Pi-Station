@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 — 2026-09-05
+
+- Protect passwordless installations with a persistent initial-access token; require a permanent password to finish setup.
+- Apply password changes immediately, close existing WebSockets and throttle failed logins.
+- Reject cross-origin mutations and WebSockets; stop caching authenticated HTML in the service worker.
+- Add outgoing-message cancellation, manual retry and selectable queue expiry (15 minutes to 7 days).
+- Mark interrupted or uncertain sends as unconfirmed; disable implicit RF retries after missing ACKs.
+- Validate and stage backup merges before updating the live database; save a restricted pre-restore SQLite snapshot.
+- Preserve message timelines and attempt metadata in backups; imported pending messages require manual retry.
+- Protect pending/unconfirmed messages from history pruning and fix deleted-message counts.
+- Preserve pending setup passwords, BLE PINs and TLS files across repeated wizard saves.
+- Document migration and recovery in Russian and English. No hardware deployment performed.
+
 ## 0.6.0 — 2026-09-05
 
 - Added a first-run wizard for USB, BLE, language, password and local HTTPS setup.

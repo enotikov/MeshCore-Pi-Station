@@ -1,12 +1,34 @@
 # MeshCore Pi Station — English guide
 
+## Upgrading to 0.7.0: initial access and recovery
+
+Use your configured password if one already exists. Otherwise, sign in with the configured username (default `meshcore`) and read the initial password on the Raspberry Pi:
+
+```bash
+sudo cat /var/lib/meshcore-pi-station/setup-token
+```
+
+The service creates this file on startup and removes it after a permanent password of at least 12 characters is set. Development instances use `MESHCORE_DATA_DIR/setup-token`. Use a trusted local network for setup or configure TLS first: a one-time code does not encrypt HTTP. Ten failed logins from a peer block attempts until the end of a one-minute window; forwarded proxy headers are not used to identify peers.
+
+Password changes apply immediately and close existing WebSockets. USB/BLE and HTTPS changes require a service restart. Authentication uses HTTP Basic; separate session management and logout are not included.
+
+Select a queue lifetime before sending: 15 minutes, 1 hour, 24 hours or 7 days. Expiry stops waiting messages, not an active transmission. Click a message to cancel a queued send or manually retry a failed, cancelled, expired or unconfirmed message. Manual retry starts a new 24-hour lifetime. A missing ACK or restart during transmission results in “delivery unconfirmed”: the packet may have arrived, so retrying can deliver a duplicate. Channel “sent” is not recipient confirmation. Legacy queues without a deadline remain without one until manually retried.
+
+Backups include contacts, channel secrets, messages with status timelines and retention policy. They **exclude** `station.json`, login passwords, BLE PINs, TLS certificates, maps, statistics and the radio private key. Identity has a separate export. Prefer encrypted `.mcps` files; plain JSON contains channel secrets.
+
+Restore merges records without deleting records absent from the backup, stages and validates changes, and saves a pre-restore SQLite snapshot under `/var/lib/meshcore-pi-station/recovery/before-restore-*.db`. Imported pending messages are cancelled and require manual retry. Restored retention settings apply after restart or saving the retention form. Recovery snapshots are not encrypted; Linux file permissions restrict access. They are not automatically deleted, so monitor disk space.
+
+To roll back a restore: stop the service, preserve the current `station.db`, `station.db-wal` and `station.db-shm` separately if present, copy the selected snapshot to `station.db`, ensure stale WAL/SHM files are absent, set ownership to `meshcore:meshcore`, and start the service. Never replace a database while the application is running.
+
+This release was not installed on a physical Raspberry Pi or tested with a physical Heltec during preparation.
+
 ## Purpose
 
 MeshCore Pi Station turns a Raspberry Pi into a local control station for a MeshCore Companion Radio connected over USB or Bluetooth Low Energy. The interface can be opened from a computer, phone, or the Raspberry Pi display. No cloud messaging service is required.
 
 The application can flash a Heltec V4 over USB from the Settings page. It starts in simulator mode and firmware flashing is disabled by default for safety; enable it after configuring HTTPS and password authentication. Once compatible Companion Firmware is installed, the Heltec can be used over USB or Bluetooth Low Energy.
 
-## Version 0.6.0 features
+## Version 0.7.0 features
 
 - persistent Russian and English interfaces;
 - direct and channel messages with local SQLite history;
@@ -26,7 +48,7 @@ The application can flash a Heltec V4 over USB from the Settings page. It starts
 - cacheable PWA shell, built-in HTTPS and configurable HTTP Basic authentication.
 - authenticated Heltec V4 USB flashing with live progress in the web interface.
 - first-run setup for USB, BLE, language, password and local HTTPS;
-- persistent outgoing queue with retries and a per-message delivery timeline;
+- persistent outgoing queue with cancellation, manual retry, expiry and a per-message delivery timeline;
 - Raspberry Pi temperature, uptime, load, disk, database, USB and Bluetooth diagnostics;
 - configurable history retention and database limits;
 - optional trusted firmware catalogs with Heltec V4 and SHA-256 verification.
@@ -44,7 +66,7 @@ The application can flash a Heltec V4 over USB from the Settings page. It starts
 
 ```bash
 sudo apt update
-sudo apt install ./meshcore-pi-station_0.6.0_all.deb
+sudo apt install ./meshcore-pi-station_0.7.0_all.deb
 sudo systemctl status meshcore-pi-station
 ```
 
@@ -123,7 +145,7 @@ MESHCORE_TLS_CERT=/var/lib/meshcore-pi-station/tls/server.crt
 MESHCORE_TLS_KEY=/var/lib/meshcore-pi-station/tls/server.key
 ```
 
-After `sudo systemctl restart meshcore-pi-station`, open `https://<raspberry-pi-ip>:8080`. Browsers warn about a self-signed certificate; use a certificate from your own trusted CA for warning-free HTTPS. Authentication is disabled when the password is empty. Certificate and key must be configured together.
+After `sudo systemctl restart meshcore-pi-station`, open `https://<raspberry-pi-ip>:8080`. Browsers warn about a self-signed certificate; use a certificate from your own trusted CA for warning-free HTTPS. When the permanent password is empty, initial access requires the one-time code from the `setup-token` file in the station data directory. Certificate and key must be configured together.
 
 ## Offline maps
 
@@ -137,9 +159,9 @@ After restarting, MBTiles takes priority over the online basemap. Do not bulk-do
 
 ## Setup wizard and message queue
 
-On first launch, version 0.6.0 asks for the language, USB/BLE/simulator transport, device address, username, password and local HTTPS. The wizard writes `/var/lib/meshcore-pi-station/station.json` with mode `0600`; this file takes priority for wizard-managed values. Delete it to return to `/etc/default/meshcore-pi-station`. Restart the service after changing the transport, password or HTTPS.
+On first launch, version 0.7.0 asks for the language, USB/BLE/simulator transport, device address, username, password and local HTTPS. The wizard writes `/var/lib/meshcore-pi-station/station.json` with mode `0600`; this file takes priority for wizard-managed values. Delete it to return to `/etc/default/meshcore-pi-station`. Password changes take effect immediately and require signing in again. Restart the service after changing the transport or HTTPS.
 
-When the Companion is unavailable, outgoing messages remain queued in SQLite. The station retries them after reconnection up to `MESHCORE_MESSAGE_MAX_ATTEMPTS` times. Each message card shows its complete delivery timeline and per-attempt error details.
+When the Companion is unavailable, outgoing messages remain queued in SQLite. The station sends them after reconnection if they have not expired. Uncertain results require manual retry. Each message card shows its complete delivery timeline and per-attempt error details.
 
 ## Trusted firmware catalog
 
@@ -172,8 +194,8 @@ Only `heltec-v4` entries are accepted. The station downloads the image to the Ra
 | `MESHCORE_FIRMWARE_FLASH` | `false` | Enable web-based Heltec firmware flashing |
 | `MESHCORE_FIRMWARE_BAUD` | `460800` | `esptool` write speed |
 | `MESHCORE_FIRMWARE_CATALOG_URL` | `builtin` | Built-in catalog or trusted HTTPS JSON URL; empty disables the catalog |
-| `MESHCORE_MESSAGE_RETRY_SECONDS` | `10` | Outgoing retry interval |
-| `MESHCORE_MESSAGE_MAX_ATTEMPTS` | `5` | Maximum delivery attempts |
+| `MESHCORE_MESSAGE_RETRY_SECONDS` | `10` | Queue polling interval |
+| `MESHCORE_MESSAGE_MAX_ATTEMPTS` | `5` | Legacy option; automatic retries after transmission are disabled |
 | `MESHCORE_HISTORY_DAYS` | `30` | Message and event retention |
 | `MESHCORE_PACKET_HISTORY_LIMIT` | `10000` | Maximum retained packet events |
 | `MESHCORE_STATS_HISTORY_LIMIT` | `1440` | Maximum retained statistics samples |

@@ -242,9 +242,9 @@ class MeshCoreSerialTransport(RadioTransport):
         contact = self._mc.get_contact_by_key_prefix(target_id)
         if contact is None:
             raise RuntimeError("Контакт не найден в памяти модема")
-        result = await self._mc.commands.send_msg_with_retry(contact, text)
+        result = await self._mc.commands.send_msg_with_retry(contact, text, max_attempts=1)
         if result is None or result.type == EventType.ERROR:
-            raise RuntimeError("Подтверждение доставки не получено")
+            return {"radio_id": None, "status": "unconfirmed"}
         expected = result.payload.get("expected_ack", b"")
         radio_id = expected.hex() if hasattr(expected, "hex") else str(expected)
         return {"radio_id": radio_id, "status": "delivered"}

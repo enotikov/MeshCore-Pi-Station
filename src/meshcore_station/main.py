@@ -10,8 +10,9 @@ import secrets
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -19,6 +20,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
+from .backup import validate_backup
+from .security import LoginLimiter, bootstrap_password
 from .database import Database
 from .diagnostics import system_diagnostics
 from .firmware import FirmwareFlasher
@@ -43,8 +46,8 @@ def _valid_basic_authorization(header: str, settings: Settings) -> bool:
         if scheme.lower() != "basic":
             return False
         username, password = base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)
-        return secrets.compare_digest(username, settings.web_username) and secrets.compare_digest(
-            password, settings.web_password
+        return secrets.compare_digest(username.encode("utf-8"), settings.web_username.encode("utf-8")) and secrets.compare_digest(
+            password.encode("utf-8"), settings.web_password.encode("utf-8")
         )
     except (ValueError, UnicodeDecodeError):
         return False
@@ -86,9 +89,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         baud=settings.firmware_flash_baud, callback=firmware_event,
     )
     firmware_upload_lock = asyncio.Lock()
+    setup_lock = asyncio.Lock()
+    auth_settings = settings
+    bootstrap = not bool(settings.web_password)
+    limiter = LoginLimiter()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        nonlocal auth_settings
+        if bootstrap:
+            auth_settings = replace(settings, web_password=bootstrap_password(settings.data_dir))
         await station.start()
         policy = database.get_settings()
         database.prune_history(
@@ -100,17 +110,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await flasher.close()
         await station.stop()
 
-    app = FastAPI(title="MeshCore Pi Station", version="0.6.0", lifespan=lifespan)
+    app = FastAPI(title="MeshCore Pi Station", version="0.7.0", lifespan=lifespan)
     app.state.station = station
     app.state.settings = settings
     app.state.flasher = flasher
 
     @app.middleware("http")
     async def optional_basic_auth(request: Request, call_next):
-        if not settings.web_password:
-            return await call_next(request)
-        if not _valid_basic_authorization(request.headers.get("authorization", ""), settings):
-            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="MeshCore Pi Station"'})
+        peer = request.client.host if request.client else "unknown"
+        if limiter.blocked(peer):
+            return Response(status_code=429, headers={"Retry-After": "60"})
+        if not _valid_basic_authorization(request.headers.get("authorization", ""), auth_settings):
+            if request.headers.get("authorization"):
+                limiter.failed(peer)
+            message = "Initial login: use the configured username and the setup-token file in the station data directory. / Первый вход: пароль находится в файле setup-token в каталоге данных станции." if bootstrap else "Authentication required"
+            return Response(message, status_code=401, headers={"WWW-Authenticate": 'Basic realm="MeshCore Pi Station", charset="UTF-8"'})
+        limiter.success(peer)
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            origin = request.headers.get("origin")
+            if origin and urlsplit(origin).netloc != request.headers.get("host"):
+                return JSONResponse({"detail": "Cross-origin request rejected"}, status_code=403)
         response = await call_next(request)
         return response
 
@@ -120,43 +139,70 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Cache-Control"] = "no-store"
         if request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
 
     @app.get("/api/status")
     async def status():
-        return {**station.status, "version": "0.6.0", "onboarding_complete": bool(database.get_settings().get("onboarding_complete"))}
+        return {**station.status, "version": "0.7.0", "onboarding_complete": bool(database.get_settings().get("onboarding_complete"))}
 
     @app.get("/api/setup")
     async def setup_status():
+        pending = {}
+        if settings.runtime_config_path.is_file():
+            pending = json.loads(settings.runtime_config_path.read_text(encoding="utf-8"))
         return {
             "complete": bool(database.get_settings().get("onboarding_complete")),
-            "transport": settings.transport,
-            "serial_port": settings.serial_port,
-            "ble_address": settings.ble_address,
+            "transport": pending.get("transport", settings.transport),
+            "serial_port": pending.get("serial_port", settings.serial_port),
+            "ble_address": pending.get("ble_address", settings.ble_address),
             "serial_ports": list_serial_ports(),
-            "web_username": settings.web_username,
-            "https_enabled": bool(settings.tls_cert and settings.tls_key),
+            "web_username": auth_settings.web_username,
+            "password_required": bootstrap,
+            "https_enabled": bool(pending.get("tls_cert", settings.tls_cert) and pending.get("tls_key", settings.tls_key)),
         }
 
     @app.post("/api/setup")
     async def save_setup(request: SetupRequest):
+        async with setup_lock:
+            return await persist_setup(request)
+
+    async def persist_setup(request: SetupRequest):
+        nonlocal auth_settings, bootstrap
         if request.serial_port != "auto" and not request.serial_port.startswith("/dev/"):
             raise HTTPException(400, "USB-порт должен находиться в /dev или иметь значение auto")
         if request.web_password and len(request.web_password) < 12:
             raise HTTPException(400, "Пароль должен содержать не менее 12 символов")
+        if bootstrap and not request.web_password:
+            raise HTTPException(400, "Задайте постоянный пароль не менее 12 символов")
+        if ":" in request.web_username:
+            raise HTTPException(400, "Имя пользователя не может содержать двоеточие")
         payload = request.model_dump()
         if not payload["web_password"]:
-            payload["web_password"] = settings.web_password
+            payload["web_password"] = auth_settings.web_password
+        if not payload["ble_pin"]:
+            payload["ble_pin"] = settings.ble_pin
+        existing = {}
+        if settings.runtime_config_path.is_file():
+            existing = json.loads(settings.runtime_config_path.read_text(encoding="utf-8"))
+        if not request.ble_pin:
+            payload["ble_pin"] = existing.get("ble_pin", settings.ble_pin)
+        payload["tls_cert"] = ""
+        payload["tls_key"] = ""
         if request.enable_https:
-            cert, key = await asyncio.to_thread(
-                generate_self_signed_certificate, settings.data_dir / "tls"
-            )
+            cert = existing.get("tls_cert") or settings.tls_cert
+            key = existing.get("tls_key") or settings.tls_key
+            if not cert or not key or not Path(cert).is_file() or not Path(key).is_file():
+                cert, key = await asyncio.to_thread(generate_self_signed_certificate, settings.data_dir / "tls")
             payload["tls_cert"], payload["tls_key"] = str(cert), str(key)
         settings.data_dir.mkdir(parents=True, exist_ok=True)
+        settings.runtime_config_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = settings.runtime_config_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(payload, output, ensure_ascii=False, indent=2)
         temporary.replace(settings.runtime_config_path)
         try:
             settings.runtime_config_path.chmod(0o600)
@@ -164,6 +210,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             pass
         database.set_setting("onboarding_complete", True)
         database.set_setting("configured_transport", request.transport)
+        auth_settings = replace(auth_settings, web_username=request.web_username, web_password=payload["web_password"])
+        bootstrap = False
+        (settings.data_dir / "setup-token").unlink(missing_ok=True)
+        for socket in tuple(station._sockets):
+            await socket.close(code=1008)
+            station.remove_socket(socket)
         return {
             "ok": True,
             "restart_required": True,
@@ -201,7 +253,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             **flasher.status,
             "enabled": settings.firmware_flash_enabled,
-            "auth_configured": bool(settings.web_password),
+            "auth_configured": not bootstrap,
             "ports": list_serial_ports(),
             "max_bytes": 16 * 1024 * 1024,
             "catalog_configured": bool(settings.firmware_catalog_url),
@@ -217,7 +269,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/firmware/catalog/flash", status_code=202)
     async def flash_catalog_firmware(request: CatalogFlashRequest):
-        if not settings.firmware_flash_enabled or not settings.web_password:
+        if not settings.firmware_flash_enabled or bootstrap:
             raise HTTPException(403, "Прошивка требует включённой функции и входа по паролю")
         if request.confirmation != "HELTEC V4":
             raise HTTPException(400, "Введите подтверждение HELTEC V4")
@@ -253,7 +305,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         if not settings.firmware_flash_enabled:
             raise HTTPException(403, "Прошивка отключена в конфигурации станции")
-        if not settings.web_password:
+        if bootstrap:
             raise HTTPException(403, "Для прошивки необходимо включить вход по паролю")
         if request.headers.get("x-flash-confirmation") != "HELTEC V4":
             raise HTTPException(400, "Введите подтверждение HELTEC V4")
@@ -367,10 +419,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/messages")
     async def send_message(request: SendMessageRequest):
-        result = await station.send_message(request.target_type, request.target_id, request.text)
+        result = await station.send_message(request.target_type, request.target_id, request.text, request.ttl_seconds)
         if result["status"] == "failed":
             raise HTTPException(503, result.get("error", "Ошибка отправки"))
         return result
+
+    @app.post("/api/messages/{message_id}/cancel")
+    async def cancel_message(message_id: int):
+        return await change_message(message_id, "cancel")
+
+    @app.post("/api/messages/{message_id}/retry")
+    async def retry_message(message_id: int):
+        return await change_message(message_id, "retry")
+
+    async def change_message(message_id: int, action: str):
+        try:
+            return await station.message_action(message_id, action)
+        except KeyError as exc:
+            raise HTTPException(404, "Сообщение не найдено") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/advert")
     async def advert(request: AdvertRequest):
@@ -525,11 +593,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/backup")
     async def restore_backup(request: BackupImportRequest):
         try:
-            result = database.import_data(request.data)
+            async with station._send_lock:
+                result = database.import_data(request.data)
             await station.broadcast("database_changed", result)
             return result
-        except (ValueError, KeyError, TypeError) as exc:
-            raise HTTPException(400, str(exc)) from exc
+        except (ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+            raise HTTPException(400, "Некорректная резервная копия; данные не изменены") from exc
+
+    @app.post("/api/backup/preview")
+    async def preview_backup(request: BackupImportRequest):
+        try:
+            return validate_backup(request.data)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, "Некорректная резервная копия") from exc
 
     def backup_key(password: str, salt: bytes) -> bytes:
         from cryptography.hazmat.primitives import hashes
@@ -560,10 +636,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise ValueError("Некорректный формат зашифрованного backup")
             salt, nonce, encrypted = payload[5:21], payload[21:33], payload[33:]
             plaintext = AESGCM(backup_key(request.password, salt)).decrypt(nonce, encrypted, b"MCPS1")
-            result = database.import_data(json.loads(plaintext))
+            async with station._send_lock:
+                result = database.import_data(json.loads(plaintext))
             await station.broadcast("database_changed", result)
             return result
-        except (ValueError, InvalidTag, json.JSONDecodeError) as exc:
+        except (ValueError, InvalidTag, KeyError, TypeError, sqlite3.Error) as exc:
             raise HTTPException(400, "Неверный пароль или повреждённый backup") from exc
 
     @app.post("/api/identity/backup")
@@ -602,10 +679,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket(socket: WebSocket):
-        if settings.web_password:
-            if not _valid_basic_authorization(socket.headers.get("authorization", ""), settings):
-                await socket.close(code=1008)
-                return
+        origin = socket.headers.get("origin")
+        peer = socket.client.host if socket.client else "unknown"
+        if limiter.blocked(peer) or (origin and urlsplit(origin).netloc != socket.headers.get("host")):
+            await socket.close(code=1008)
+            return
+        if not _valid_basic_authorization(socket.headers.get("authorization", ""), auth_settings):
+            limiter.failed(peer)
+            await socket.close(code=1008)
+            return
         await station.add_socket(socket)
         try:
             while True:
@@ -644,6 +726,7 @@ def run() -> None:
         "meshcore_station.main:app",
         host=settings.host,
         port=settings.port,
+        proxy_headers=False,
         ssl_certfile=str(settings.tls_cert) if settings.tls_cert else None,
         ssl_keyfile=str(settings.tls_key) if settings.tls_key else None,
         ssl_keyfile_password=settings.tls_key_password or None,

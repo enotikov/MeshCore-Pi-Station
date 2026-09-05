@@ -4,6 +4,8 @@ import json
 import sqlite3
 import threading
 import time
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +124,7 @@ class Database:
                 ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
                 ("last_attempt", "INTEGER"),
                 ("error", "TEXT NOT NULL DEFAULT ''"),
+                ("expires_at", "INTEGER"),
             ):
                 if name not in message_columns:
                     self._connection.execute(f"ALTER TABLE messages ADD COLUMN {name} {definition}")
@@ -131,12 +134,12 @@ class Database:
             if interrupted:
                 timestamp = int(time.time())
                 self._connection.execute(
-                    "UPDATE messages SET status='queued', error='Станция была перезапущена' "
+                    "UPDATE messages SET status='unconfirmed', error='Станция была перезапущена' "
                     "WHERE direction='out' AND status='sending'"
                 )
                 self._connection.executemany(
                     "INSERT INTO message_status_events(message_id, status, created_at, detail) "
-                    "VALUES(?, 'queued', ?, 'Станция была перезапущена')",
+                    "VALUES(?, 'unconfirmed', ?, 'Станция была перезапущена')",
                     [(int(row["id"]), timestamp) for row in interrupted],
                 )
 
@@ -245,6 +248,7 @@ class Database:
         radio_id: str | None = None,
         created_at: int | None = None,
         metadata: dict[str, Any] | None = None,
+        expires_at: int | None = None,
     ) -> dict[str, Any]:
         payload = (
             radio_id,
@@ -255,13 +259,14 @@ class Database:
             status,
             int(created_at or time.time()),
             json.dumps(metadata or {}, ensure_ascii=False),
+            expires_at,
         )
         with self._lock, self._connection:
             cursor = self._connection.execute(
                 """
                 INSERT INTO messages
-                    (radio_id, target_type, target_id, direction, text, status, created_at, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (radio_id, target_type, target_id, direction, text, status, created_at, metadata_json, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 payload,
             )
@@ -318,6 +323,21 @@ class Database:
                 (message_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def reset_message_deadline(self, message_id: int, ttl_seconds: int = 86400) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE messages SET expires_at=?, attempt_count=0, last_attempt=NULL WHERE id=?",
+                (int(time.time()) + ttl_seconds, message_id),
+            )
+
+    def expire_queued_messages(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id FROM messages WHERE status='queued' AND expires_at IS NOT NULL AND expires_at <= ?",
+                (int(time.time()),),
+            ).fetchall()
+            return [self.update_message(row["id"], "expired") for row in rows]
 
     def queued_messages(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock:
@@ -434,9 +454,10 @@ class Database:
         self.packet_limit = packet_limit
         self.stats_limit = stats_limit
         with self._lock, self._connection:
-            before_messages = self._connection.total_changes
-            self._connection.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
-            removed_messages = self._connection.total_changes - before_messages
+            removed_messages = self._connection.execute(
+                "DELETE FROM messages WHERE created_at < ? AND status NOT IN ('queued', 'sending', 'unconfirmed')",
+                (cutoff,),
+            ).rowcount
             before_packets = self._connection.total_changes
             self._connection.execute("DELETE FROM packet_events WHERE created_at < ?", (cutoff,))
             self._connection.execute(
@@ -496,10 +517,36 @@ class Database:
         for row in rows:
             item = dict(row)
             item["metadata"] = json.loads(item.pop("metadata_json"))
+            item["timeline"] = self.message_timeline(int(item["id"]))
             result.append(item)
         return result
 
     def import_data(self, data: dict[str, Any]) -> dict[str, int]:
+        """Validate on an isolated copy; publish only a completely successful merge."""
+        from .backup import validate_backup
+
+        validate_backup(data)
+        with self._lock, tempfile.TemporaryDirectory(prefix="mcps-restore-") as temporary:
+            staged = Database(Path(temporary) / "staged.db")
+            try:
+                self._connection.backup(staged._connection)
+                staged.initialize()
+                result = staged._import_data(data)
+                recovery = self.path.parent / "recovery"
+                recovery.mkdir(mode=0o700, exist_ok=True)
+                snapshot = recovery / f"before-restore-{uuid.uuid4().hex}.db"
+                # Reserve with restrictive permissions before writing any secrets.
+                import os
+                descriptor = os.open(snapshot, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.close(descriptor)
+                with sqlite3.connect(snapshot) as destination:
+                    self._connection.backup(destination)
+                staged._connection.backup(self._connection)
+                return result
+            finally:
+                staged.close()
+
+    def _import_data(self, data: dict[str, Any]) -> dict[str, int]:
         if int(data.get("version", 0)) != 1:
             raise ValueError("Неподдерживаемая версия резервной копии")
         counts = {"contacts": 0, "channels": 0, "messages": 0, "settings": 0}
@@ -514,6 +561,8 @@ class Database:
             self.upsert_channel(channel)
             counts["channels"] += 1
         for key, value in data.get("settings", {}).items():
+            if key not in {"history_days", "packet_limit", "stats_limit"}:
+                continue
             self.set_setting(str(key), value)
             counts["settings"] += 1
         with self._lock:
@@ -537,12 +586,30 @@ class Database:
             )
             if fingerprint in existing_messages:
                 continue
-            self.add_message(
+            original_status = message.get("status", "received")
+            restored_status = "cancelled" if original_status in {"queued", "sending"} else original_status
+            restored = self.add_message(
                 target_type=message["target_type"], target_id=str(message["target_id"]),
                 direction=message["direction"], text=message["text"],
-                status=message.get("status", "received"), radio_id=radio_id,
+                status=restored_status, radio_id=radio_id,
                 created_at=message.get("created_at"), metadata=message.get("metadata"),
+                expires_at=message.get("expires_at"),
             )
+            with self._connection:
+                self._connection.execute(
+                    "UPDATE messages SET attempt_count=?, last_attempt=?, error=? WHERE id=?",
+                    (message.get("attempt_count", 0), message.get("last_attempt"), message.get("error", ""), restored["id"]),
+                )
+                if message.get("timeline"):
+                    self._connection.execute("DELETE FROM message_status_events WHERE message_id=?", (restored["id"],))
+                    self._connection.executemany(
+                        "INSERT INTO message_status_events(message_id, status, created_at, detail) VALUES(?, ?, ?, ?)",
+                        [(restored["id"], event["status"], event["created_at"], event.get("detail", "")) for event in message["timeline"]],
+                    )
+            if restored_status != original_status:
+                self.update_message(restored["id"], restored_status, error="Восстановлено из копии; требуется ручная отправка")
+            if radio_id:
+                existing_radio_ids.add(radio_id)
             existing_messages.add(fingerprint)
             counts["messages"] += 1
         return counts

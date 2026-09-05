@@ -165,6 +165,8 @@ class StationService:
 
     async def _queue_loop(self) -> None:
         while not self._stop_event.is_set():
+            for message in self.database.expire_queued_messages():
+                await self.broadcast("message", message)
             if self.status.get("connected") and not self._maintenance:
                 for message in self.database.queued_messages():
                     await self._deliver_message(message)
@@ -187,24 +189,53 @@ class StationService:
             for channel in await self.transport.channels():
                 self.database.upsert_channel(channel)
 
-    async def send_message(self, target_type: str, target_id: str, text: str) -> dict[str, Any]:
+    async def send_message(self, target_type: str, target_id: str, text: str, ttl_seconds: int = 86400) -> dict[str, Any]:
         message = self.database.add_message(
             target_type=target_type,
             target_id=target_id,
             direction="out",
             text=text,
             status="queued",
+            expires_at=int(time.time()) + ttl_seconds,
         )
         await self.broadcast("message", message)
         if not self.status.get("connected") or self._maintenance:
             return message
         return await self._deliver_message(message)
 
+    async def message_action(self, message_id: int, action: str) -> dict[str, Any]:
+        # Never wait behind an active radio send and then pretend to cancel it.
+        current = self.database.get_message(message_id)
+        if current["status"] == "sending":
+            raise ValueError("Отправка уже выполняется")
+        async with self._send_lock:
+            current = self.database.get_message(message_id)
+            allowed = {"queued"} if action == "cancel" else {"failed", "expired", "cancelled", "unconfirmed"}
+            if current["direction"] != "out" or current["status"] not in allowed:
+                raise ValueError("Действие недоступно для текущего статуса")
+            if action == "retry":
+                self.database.reset_message_deadline(message_id)
+            message = self.database.update_message(message_id, "cancelled" if action == "cancel" else "queued")
+            await self.broadcast("message", message)
+            return message
+
     async def _deliver_message(self, message: dict[str, Any]) -> dict[str, Any]:
         async with self._send_lock:
             message = self.database.get_message(int(message["id"]))
             if message["status"] != "queued":
                 return message
+            if message.get("expires_at") and message["expires_at"] <= int(time.time()):
+                message = self.database.update_message(message["id"], "expired")
+                await self.broadcast("message", message)
+                return message
+            if not self.status.get("connected") or self._maintenance:
+                return message
+            if message["target_type"] == "contact":
+                contact = self.database.get_contact(str(message["target_id"]))
+                if contact and contact.get("blocked"):
+                    message = self.database.update_message(message["id"], "failed", error="Контакт заблокирован")
+                    await self.broadcast("message", message)
+                    return message
             message = self.database.update_message(message["id"], "sending", attempted=True)
             await self.broadcast("message", message)
             target_type = str(message["target_type"])
@@ -219,9 +250,9 @@ class StationService:
                     message["id"], result.get("status", "sent"), result.get("radio_id")
                 )
             except Exception as exc:
-                terminal = int(message.get("attempt_count", 0)) >= self.message_max_attempts
+                # Once handed to a transport, an exception cannot prove no RF send occurred.
                 message = self.database.update_message(
-                    message["id"], "failed" if terminal else "queued", error=str(exc)
+                    message["id"], "unconfirmed", error=str(exc)
                 )
             await self.broadcast("message", message)
             packet = self.database.add_packet_event(
