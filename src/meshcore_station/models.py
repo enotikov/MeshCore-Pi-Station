@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 class SendMessageRequest(BaseModel):
     target_type: Literal["contact", "channel"]
     target_id: str = Field(min_length=1, max_length=128)
-    text: str = Field(min_length=1, max_length=160)
+    text: str = Field(min_length=1, max_length=133)
     ttl_seconds: int = Field(86400, ge=60, le=604800)
 
 
@@ -107,6 +107,12 @@ class HistoryPolicyRequest(BaseModel):
     history_days: int = Field(30, ge=1, le=3650)
     packet_limit: int = Field(10000, ge=100, le=1_000_000)
     stats_limit: int = Field(1440, ge=60, le=100_000)
+
+
+class AutoBackupPolicyRequest(BaseModel):
+    enabled: bool = False
+    interval_hours: int = Field(24, ge=1, le=720)
+    retain_count: int = Field(7, ge=1, le=100)
 
 
 class CatalogFlashRequest(BaseModel):

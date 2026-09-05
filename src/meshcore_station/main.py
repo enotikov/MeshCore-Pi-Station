@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import sqlite3
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -19,8 +20,10 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .config import Settings
 from .backup import validate_backup
+from .automatic_backup import AutomaticBackupManager
 from .security import LoginLimiter, bootstrap_password
 from .database import Database
 from .diagnostics import system_diagnostics
@@ -31,6 +34,7 @@ from .models import (
     ContactUpdateRequest, DatagramRequest, DeviceSettingsRequest, EncryptedBackupRequest,
     EncryptedRestoreRequest, IdentityBackupRequest, MockIncomingRequest, PathRequest,
     SendMessageRequest, TraceRequest, SetupRequest, HistoryPolicyRequest, CatalogFlashRequest,
+    AutoBackupPolicyRequest,
 )
 from .service import StationService
 from .tls import generate_self_signed_certificate
@@ -93,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     auth_settings = settings
     bootstrap = not bool(settings.web_password)
     limiter = LoginLimiter()
+    automatic_backups = AutomaticBackupManager(database, settings.data_dir)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -106,14 +111,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             int(policy.get("packet_limit", settings.packet_history_limit)),
             int(policy.get("stats_limit", settings.stats_history_limit)),
         )
+        await automatic_backups.start()
         yield
+        await automatic_backups.stop()
         await flasher.close()
         await station.stop()
 
-    app = FastAPI(title="MeshCore Pi Station", version="0.7.0", lifespan=lifespan)
+    app = FastAPI(title="MeshCore Pi Station", version=__version__, lifespan=lifespan)
     app.state.station = station
     app.state.settings = settings
     app.state.flasher = flasher
+    app.state.automatic_backups = automatic_backups
 
     @app.middleware("http")
     async def optional_basic_auth(request: Request, call_next):
@@ -146,7 +154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/status")
     async def status():
-        return {**station.status, "version": "0.7.0", "onboarding_complete": bool(database.get_settings().get("onboarding_complete"))}
+        return {**station.status, "version": __version__, "onboarding_complete": bool(database.get_settings().get("onboarding_complete"))}
 
     @app.get("/api/setup")
     async def setup_status():
@@ -230,6 +238,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/system/diagnostics")
     async def diagnostics():
         return await asyncio.to_thread(system_diagnostics, settings.data_dir, list_serial_ports())
+
+    @app.get("/api/system/overview")
+    async def system_overview():
+        system = await asyncio.to_thread(system_diagnostics, settings.data_dir, list_serial_ports())
+        health = database.health_summary()
+        pending = sum(health["message_statuses"].get(value, 0) for value in ("queued", "sending", "unconfirmed"))
+        alerts = list(system.get("warnings", []))
+        if not station.status.get("connected"):
+            alerts.append("radio_disconnected")
+        if health["quick_check"] != "ok":
+            alerts.append("database_check_failed")
+        if automatic_backups.status().get("last_error"):
+            alerts.append("automatic_backup_failed")
+        return {
+            "radio": station.status,
+            "system": system,
+            "database": health,
+            "queue_pending": pending,
+            "automatic_backups": automatic_backups.status(),
+            "alerts": alerts,
+        }
+
+    @app.post("/api/system/reconnect")
+    async def reconnect():
+        if flasher.status.get("busy"):
+            raise HTTPException(409, "Переподключение недоступно во время прошивки")
+        try:
+            return await station.reconnect_radio()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/system/support-report")
+    async def support_report():
+        system = await asyncio.to_thread(system_diagnostics, settings.data_dir, list_serial_ports())
+        radio = station.status
+        safe_radio = {key: radio.get(key) for key in (
+            "connected", "connection_state", "connection_attempt", "connected_at", "mode",
+            "port", "baud", "error", "maintenance",
+        ) if key in radio}
+        payload = {
+            "format": "meshcore-pi-station-support-report-v1",
+            "generated_at": int(time.time()),
+            "application_version": __version__,
+            "privacy": "No messages, coordinates, passwords, channel secrets, TLS keys or BLE PINs included.",
+            "radio": safe_radio,
+            "system": system,
+            "database": database.health_summary(),
+            "automatic_backups": {
+                key: automatic_backups.status().get(key)
+                for key in ("enabled", "interval_hours", "retain_count", "last_at", "next_at", "last_error")
+            },
+        }
+        return JSONResponse(payload, headers={
+            "Content-Disposition": "attachment; filename=meshcore-pi-station-support-report.json"
+        })
 
     @app.get("/api/history/policy")
     async def history_policy():
@@ -380,6 +443,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def packets(limit: int = Query(200, ge=1, le=2000)):
         return database.list_packet_events(limit)
 
+    @app.get("/api/analytics/links")
+    async def link_quality(days: int = Query(7, ge=1, le=365)):
+        return database.link_quality(days)
+
     @app.get("/api/map/config")
     async def map_config():
         local = bool(settings.mbtiles_path and settings.mbtiles_path.is_file())
@@ -416,6 +483,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if target_type == "contact":
             database.mark_read(target_id)
         return database.list_messages(target_type, target_id, limit)
+
+    @app.get("/api/messages/search")
+    async def search_messages(
+        q: str = Query("", max_length=160),
+        status: str = Query("", pattern="^(|queued|sending|sent|delivered|received|failed|unconfirmed|expired|cancelled)$"),
+        since: int | None = Query(None, ge=0), until: int | None = Query(None, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+    ):
+        if since is not None and until is not None and since > until:
+            raise HTTPException(400, "Начальная дата позже конечной")
+        return database.search_messages(q.strip(), status, since, until, limit)
 
     @app.post("/api/messages")
     async def send_message(request: SendMessageRequest):
@@ -642,6 +720,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return result
         except (ValueError, InvalidTag, KeyError, TypeError, sqlite3.Error) as exc:
             raise HTTPException(400, "Неверный пароль или повреждённый backup") from exc
+
+    @app.get("/api/backup/automatic")
+    async def automatic_backup_status():
+        return automatic_backups.status()
+
+    @app.put("/api/backup/automatic")
+    async def automatic_backup_policy(request: AutoBackupPolicyRequest):
+        return automatic_backups.set_policy(**request.model_dump())
+
+    @app.post("/api/backup/automatic/run", status_code=201)
+    async def run_automatic_backup():
+        try:
+            return await automatic_backups.run_now()
+        except Exception as exc:
+            raise HTTPException(500, f"Не удалось создать автоматическую копию: {exc}") from exc
+
+    @app.get("/api/backup/automatic/{name}")
+    async def download_automatic_backup(name: str):
+        try:
+            path = automatic_backups.path(name)
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(404, "Копия не найдена") from exc
+        return FileResponse(path, filename=path.name, media_type="application/octet-stream")
+
+    @app.post("/api/backup/automatic/{name}/restore")
+    async def restore_automatic_backup(name: str):
+        try:
+            data = await asyncio.to_thread(automatic_backups.decode, name)
+            async with station._send_lock:
+                result = database.import_data(data)
+            await station.broadcast("database_changed", result)
+            return result
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "Копия не найдена") from exc
+        except Exception as exc:
+            raise HTTPException(400, "Автоматическую копию не удалось восстановить") from exc
 
     @app.post("/api/identity/backup")
     async def identity_backup(request: IdentityBackupRequest):

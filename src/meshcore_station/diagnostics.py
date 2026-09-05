@@ -33,6 +33,37 @@ def _bluetooth_devices() -> list[dict[str, str]]:
     return devices
 
 
+def _throttling() -> dict[str, Any]:
+    tool = shutil.which("vcgencmd")
+    if not tool:
+        return {"available": False, "raw": None, "flags": []}
+    try:
+        result = subprocess.run([tool, "get_throttled"], capture_output=True, text=True, timeout=3, check=False)
+        raw = int(result.stdout.strip().split("=", 1)[-1], 16)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {"available": True, "raw": None, "flags": ["read_error"]}
+    bits = {
+        0: "undervoltage_now", 1: "frequency_capped_now", 2: "throttled_now", 3: "soft_temp_limit_now",
+        16: "undervoltage_occurred", 17: "frequency_capped_occurred",
+        18: "throttling_occurred", 19: "soft_temp_limit_occurred",
+    }
+    return {"available": True, "raw": f"0x{raw:x}", "flags": [name for bit, name in bits.items() if raw & (1 << bit)]}
+
+
+def _memory() -> dict[str, int | None]:
+    values: dict[str, int] = {}
+    text = _read_text(Path("/proc/meminfo"))
+    if text:
+        for line in text.splitlines():
+            name, _, value = line.partition(":")
+            try:
+                values[name] = int(value.strip().split()[0]) * 1024
+            except (ValueError, IndexError):
+                continue
+    total, available = values.get("MemTotal"), values.get("MemAvailable")
+    return {"total": total, "available": available, "used": total - available if total and available else None}
+
+
 def system_diagnostics(data_dir: Path, serial_ports: list[str]) -> dict[str, Any]:
     usage = shutil.disk_usage(data_dir)
     temperature = _read_text(Path("/sys/class/thermal/thermal_zone0/temp"))
@@ -49,6 +80,12 @@ def system_diagnostics(data_dir: Path, serial_ports: list[str]) -> dict[str, Any
         load = [round(value, 2) for value in os.getloadavg()]
     except (AttributeError, OSError):
         load = []
+    throttling = _throttling()
+    warnings = list(throttling["flags"])
+    if temperature_c is not None and temperature_c >= 75:
+        warnings.append("temperature_high")
+    if usage.free < 512 * 1024 * 1024:
+        warnings.append("disk_space_low")
     return {
         "platform": platform.platform(),
         "python": platform.python_version(),
@@ -58,6 +95,9 @@ def system_diagnostics(data_dir: Path, serial_ports: list[str]) -> dict[str, Any
         "load_average": load,
         "temperature_c": temperature_c,
         "disk": {"total": usage.total, "used": usage.used, "free": usage.free},
+        "memory": _memory(),
+        "throttling": throttling,
+        "warnings": warnings,
         "database_bytes": (data_dir / "station.db").stat().st_size
         if (data_dir / "station.db").exists() else 0,
         "serial_ports": serial_ports,

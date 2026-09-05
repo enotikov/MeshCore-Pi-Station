@@ -124,6 +124,24 @@ class StationService:
                     self._reconnect_loop(), name="meshcore-radio-reconnect"
                 )
 
+    async def reconnect_radio(self) -> dict[str, Any]:
+        async with self._maintenance_lock:
+            if self._maintenance:
+                raise RuntimeError("Станция занята обслуживанием")
+            if self._reconnect_task:
+                self._reconnect_task.cancel()
+                try:
+                    await self._reconnect_task
+                except asyncio.CancelledError:
+                    pass
+                self._reconnect_task = None
+            await self.transport.stop()
+            if not await self._connect():
+                self._reconnect_task = asyncio.create_task(
+                    self._reconnect_loop(), name="meshcore-radio-reconnect"
+                )
+            return self.status
+
     async def stop(self) -> None:
         self._stop_event.set()
         for task in (self._reconnect_task, self._stats_task, self._queue_task):

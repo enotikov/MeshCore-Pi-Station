@@ -521,6 +521,167 @@ class Database:
             result.append(item)
         return result
 
+    def link_quality(self, days: int = 7) -> dict[str, Any]:
+        """Aggregate direct-link observations without inventing unavailable RF data."""
+        since = int(time.time()) - days * 86400
+        with self._lock:
+            contacts = self._connection.execute(
+                "SELECT id, name, kind, last_seen, last_snr, raw_json FROM contacts ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+            packets = self._connection.execute(
+                """SELECT contact_id,
+                    SUM(CASE WHEN direction='in' THEN 1 ELSE 0 END) AS rx_packets,
+                    SUM(CASE WHEN direction='out' THEN 1 ELSE 0 END) AS tx_packets,
+                    MAX(created_at) AS last_activity,
+                    AVG(CAST(COALESCE(json_extract(data_json, '$.metadata.snr'),
+                                      json_extract(data_json, '$.snr')) AS REAL)) AS average_snr,
+                    AVG(CAST(COALESCE(json_extract(data_json, '$.metadata.rssi'),
+                                      json_extract(data_json, '$.rssi')) AS REAL)) AS average_rssi,
+                    AVG(CAST(COALESCE(json_extract(data_json, '$.metadata.path_len'),
+                                      json_extract(data_json, '$.path_len')) AS REAL)) AS average_hops
+                FROM packet_events
+                WHERE contact_id IS NOT NULL AND created_at>=?
+                GROUP BY contact_id""",
+                (since,),
+            ).fetchall()
+            messages = self._connection.execute(
+                """SELECT m.target_id,
+                    COUNT(*) AS attempted_messages,
+                    SUM(CASE WHEN m.status='delivered' THEN 1 ELSE 0 END) AS delivered_messages,
+                    AVG(CASE WHEN m.status='delivered' AND delivered.created_at IS NOT NULL
+                             THEN MAX(0, delivered.created_at - m.created_at) END) AS average_delivery_seconds
+                FROM messages m
+                LEFT JOIN (
+                    SELECT message_id, MIN(created_at) AS created_at
+                    FROM message_status_events WHERE status='delivered' GROUP BY message_id
+                ) delivered ON delivered.message_id=m.id
+                WHERE m.target_type='contact' AND m.direction='out'
+                    AND m.attempt_count>0 AND m.created_at>=?
+                GROUP BY m.target_id""",
+                (since,),
+            ).fetchall()
+
+        rows: dict[str, dict[str, Any]] = {}
+        for contact in contacts:
+            raw = json.loads(contact["raw_json"] or "{}")
+            rows[str(contact["id"])] = {
+                "contact_id": str(contact["id"]),
+                "name": str(contact["name"]),
+                "kind": str(contact["kind"]),
+                "last_activity": contact["last_seen"],
+                "fallback_snr": contact["last_snr"],
+                "fallback_hops": raw.get("out_path_len"),
+                "rx_packets": 0,
+                "tx_packets": 0,
+                "average_snr": None,
+                "average_rssi": None,
+                "average_hops": None,
+                "attempted_messages": 0,
+                "delivered_messages": 0,
+                "average_delivery_seconds": None,
+            }
+
+        for packet in packets:
+            contact_id = str(packet["contact_id"])
+            row = rows.get(contact_id)
+            if row is None:
+                continue
+            row["rx_packets"] = int(packet["rx_packets"] or 0)
+            row["tx_packets"] = int(packet["tx_packets"] or 0)
+            row["last_activity"] = max(row["last_activity"] or 0, int(packet["last_activity"]))
+            for key in ("average_snr", "average_rssi", "average_hops"):
+                row[key] = round(float(packet[key]), 2) if packet[key] is not None else None
+
+        for message in messages:
+            row = rows.get(str(message["target_id"]))
+            if row is None:
+                continue
+            row["attempted_messages"] = int(message["attempted_messages"] or 0)
+            row["delivered_messages"] = int(message["delivered_messages"] or 0)
+            if message["average_delivery_seconds"] is not None:
+                row["average_delivery_seconds"] = round(float(message["average_delivery_seconds"]), 1)
+
+        result = []
+        for row in rows.values():
+            fallback_snr = row.pop("fallback_snr")
+            fallback_hops = row.pop("fallback_hops")
+            fallback_hops = fallback_hops if isinstance(fallback_hops, (int, float)) and not isinstance(fallback_hops, bool) else None
+            attempted = row["attempted_messages"]
+            if row["average_snr"] is None and fallback_snr is not None:
+                row["average_snr"] = round(float(fallback_snr), 2)
+            if row["average_hops"] is None and fallback_hops is not None and fallback_hops >= 0:
+                row["average_hops"] = round(float(fallback_hops), 2)
+            row.update({
+                "packet_count": row["rx_packets"] + row["tx_packets"],
+                "delivery_rate": round(row["delivered_messages"] * 100 / attempted, 1) if attempted else None,
+            })
+            result.append(row)
+
+        result.sort(key=lambda item: (-(item["last_activity"] or 0), item["name"].lower()))
+        measured = [item for item in result if item["packet_count"] or item["attempted_messages"] or item["average_snr"] is not None]
+        return {
+            "days": days,
+            "since": since,
+            "nodes": result,
+            "summary": {
+                "known_nodes": len(result),
+                "active_nodes": len(measured),
+                "packets": sum(item["packet_count"] for item in result),
+                "attempted_messages": sum(item["attempted_messages"] for item in result),
+                "delivered_messages": sum(item["delivered_messages"] for item in result),
+            },
+        }
+
+    def search_messages(
+        self, query: str = "", status: str = "", since: int | None = None,
+        until: int | None = None, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses, parameters = ["1=1"], []
+        if query:
+            clauses.append("(m.text LIKE ? ESCAPE '\\' OR COALESCE(c.name, ch.name, '') LIKE ? ESCAPE '\\')")
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            parameters.extend([f"%{escaped}%", f"%{escaped}%"])
+        if status:
+            clauses.append("m.status=?")
+            parameters.append(status)
+        if since is not None:
+            clauses.append("m.created_at>=?")
+            parameters.append(since)
+        if until is not None:
+            clauses.append("m.created_at<=?")
+            parameters.append(until)
+        parameters.append(limit)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""SELECT m.*, COALESCE(c.name, ch.name, m.target_id) AS target_name
+                FROM messages m
+                LEFT JOIN contacts c ON m.target_type='contact' AND c.id=m.target_id
+                LEFT JOIN channels ch ON m.target_type='channel' AND CAST(ch.id AS TEXT)=m.target_id
+                WHERE {' AND '.join(clauses)} ORDER BY m.created_at DESC, m.id DESC LIMIT ?""",
+                parameters,
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = json.loads(item.pop("metadata_json"))
+            item["timeline"] = self.message_timeline(int(item["id"]))
+            result.append(item)
+        return result
+
+    def health_summary(self) -> dict[str, Any]:
+        with self._lock:
+            message_statuses = {
+                row["status"]: row["count"] for row in self._connection.execute(
+                    "SELECT status, COUNT(*) AS count FROM messages GROUP BY status"
+                ).fetchall()
+            }
+            counts = {
+                table: int(self._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                for table in ("contacts", "channels", "messages", "packet_events", "stats_samples")
+            }
+            quick_check = str(self._connection.execute("PRAGMA quick_check").fetchone()[0])
+        return {"counts": counts, "message_statuses": message_statuses, "quick_check": quick_check}
+
     def import_data(self, data: dict[str, Any]) -> dict[str, int]:
         """Validate on an isolated copy; publish only a completely successful merge."""
         from .backup import validate_backup

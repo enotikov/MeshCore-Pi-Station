@@ -1,6 +1,6 @@
 # MeshCore Pi Station — English guide
 
-## Upgrading to 0.7.0: initial access and recovery
+## Upgrading to 0.9.0: initial access and recovery
 
 Use your configured password if one already exists. Otherwise, sign in with the configured username (default `meshcore`) and read the initial password on the Raspberry Pi:
 
@@ -28,7 +28,7 @@ MeshCore Pi Station turns a Raspberry Pi into a local control station for a Mesh
 
 The application can flash a Heltec V4 over USB from the Settings page. It starts in simulator mode and firmware flashing is disabled by default for safety; enable it after configuring HTTPS and password authentication. Once compatible Companion Firmware is installed, the Heltec can be used over USB or Bluetooth Low Energy.
 
-## Version 0.7.0 features
+## Version 0.9.0 features
 
 - persistent Russian and English interfaces;
 - direct and channel messages with local SQLite history;
@@ -52,6 +52,13 @@ The application can flash a Heltec V4 over USB from the Settings page. It starts
 - Raspberry Pi temperature, uptime, load, disk, database, USB and Bluetooth diagnostics;
 - configurable history retention and database limits;
 - optional trusted firmware catalogs with Heltec V4 and SHA-256 verification.
+- unified radio, queue, database and automatic-backup health overview;
+- per-node link quality for 24 hours, 7 days or 30 days: SNR, RSSI, RX/TX, delivery, latency and hops;
+- Raspberry Pi memory, undervoltage, frequency-capping and throttling diagnostics;
+- global message search by text, node, channel, status and date range;
+- encrypted scheduled backups with rotation, download and same-station restore;
+- privacy-filtered support reports without messages, coordinates, contacts, passwords or keys;
+- safe manual Heltec reconnection and a 133-character outbound-message limit.
 
 ## Requirements
 
@@ -66,7 +73,7 @@ The application can flash a Heltec V4 over USB from the Settings page. It starts
 
 ```bash
 sudo apt update
-sudo apt install ./meshcore-pi-station_0.7.0_all.deb
+sudo apt install ./meshcore-pi-station_0.9.0_all.deb
 sudo systemctl status meshcore-pi-station
 ```
 
@@ -159,9 +166,25 @@ After restarting, MBTiles takes priority over the online basemap. Do not bulk-do
 
 ## Setup wizard and message queue
 
-On first launch, version 0.7.0 asks for the language, USB/BLE/simulator transport, device address, username, password and local HTTPS. The wizard writes `/var/lib/meshcore-pi-station/station.json` with mode `0600`; this file takes priority for wizard-managed values. Delete it to return to `/etc/default/meshcore-pi-station`. Password changes take effect immediately and require signing in again. Restart the service after changing the transport or HTTPS.
+On first launch, version 0.9.0 asks for the language, USB/BLE/simulator transport, device address, username, password and local HTTPS. The wizard writes `/var/lib/meshcore-pi-station/station.json` with mode `0600`; this file takes priority for wizard-managed values. Delete it to return to `/etc/default/meshcore-pi-station`. Password changes take effect immediately and require signing in again. Restart the service after changing the transport or HTTPS.
 
 When the Companion is unavailable, outgoing messages remain queued in SQLite. The station sends them after reconnection if they have not expired. Uncertain results require manual retry. Each message card shows its complete delivery timeline and per-attempt error details.
+
+Outbound text is limited to 133 characters as specified by the Companion Protocol. Both the browser and API enforce the limit. Split longer text into multiple messages.
+
+## Link-quality analytics
+
+“Monitor → Link quality” aggregates locally retained data for 24 hours, 7 days or 30 days. It shows average SNR and RSSI, received and transmitted packet counts, direct-message confirmation rate, average confirmation time, hops and last activity for every known node.
+
+Delivery rate includes only direct sends that were actually attempted. Channel sends have no per-recipient acknowledgment and are excluded. Missing RSSI, latency or route information remains empty rather than being estimated. SQLite performs the aggregation without loading the complete packet history into Raspberry Pi memory.
+
+## Automatic backups and support reports
+
+Settings can enable encrypted scheduled backups and configure their interval and retained-file count. Files are stored under `/var/lib/meshcore-pi-station/automatic-backups`; their local AES-256-GCM key is `/var/lib/meshcore-pi-station/automatic-backup.key`. Preserve the key separately for disaster recovery. Lowering the retention count immediately removes the oldest automatic backups.
+
+Automatic backups can be created, downloaded and restored from the interface. They are intended for the same station or recovery with its preserved key. A password-protected `.mcps` remains the portable option between installations.
+
+“Download report” produces JSON containing the application version, OS, radio state, device paths, errors, memory, disk, database health and backup metadata. The UI shows its contents before download. Messages, coordinates, contacts, passwords, BLE PINs, channel secrets, TLS keys and radio identity are excluded.
 
 ## Trusted firmware catalog
 

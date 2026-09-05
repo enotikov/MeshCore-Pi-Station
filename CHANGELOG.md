@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0 — 2026-09-05
+
+- Added a unified station health overview with radio, queue, database and backup status.
+- Added Raspberry Pi memory, undervoltage, frequency-capping and throttling diagnostics.
+- Added manual radio reconnection, blocked while firmware flashing is active.
+- Added encrypted scheduled backups with retention, manual run, download and same-station restore.
+- Added global message search by text, node/channel name, status and date range.
+- Added a downloadable privacy-filtered support report without messages, coordinates or secrets.
+- Added per-node link-quality analytics for SNR, RSSI, packet direction, delivery, latency and hops.
+- Aligned outbound message validation and the composer counter with MeshCore's 133-character limit.
+
 ## 0.7.0 — 2026-09-05
 
 - Protect passwordless installations with a persistent initial-access token; require a permanent password to finish setup.
