@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0 — 2026-09-05
+
+- Added an acknowledgeable notification center for active station warnings.
+- Added per-node RSSI, SNR and packet-count time-series charts with bounded SQLite aggregation.
+- Added route history with direction, node, timestamp, hop count and available path metadata.
+- Added a read-only GitHub Release checker that exposes only HTTPS package and checksum links.
+- Added API validation and automated coverage for analytics, alerts and release metadata.
+- Declared the stable 1.0 API/UI baseline; physical Raspberry Pi and Heltec testing was intentionally skipped.
+
 ## 0.9.0 — 2026-09-05
 
 - Added a unified station health overview with radio, queue, database and backup status.

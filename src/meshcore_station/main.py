@@ -38,6 +38,7 @@ from .models import (
 )
 from .service import StationService
 from .tls import generate_self_signed_certificate
+from .updates import check_latest_release
 from .transports.meshcore_serial import MeshCoreSerialTransport, list_serial_ports
 from .transports.mock import MockTransport
 
@@ -98,6 +99,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     bootstrap = not bool(settings.web_password)
     limiter = LoginLimiter()
     automatic_backups = AutomaticBackupManager(database, settings.data_dir)
+
+    alert_metadata = {
+        "undervoltage_now": ("critical", "Raspberry Pi reports undervoltage now"),
+        "undervoltage_occurred": ("warning", "Raspberry Pi reported undervoltage since boot"),
+        "frequency_capped_now": ("critical", "CPU frequency is capped now"),
+        "frequency_capped_occurred": ("warning", "CPU frequency was capped since boot"),
+        "throttled_now": ("critical", "Raspberry Pi is throttled now"),
+        "throttling_occurred": ("warning", "Raspberry Pi was throttled since boot"),
+        "soft_temp_limit_now": ("critical", "Raspberry Pi temperature limit is active"),
+        "soft_temp_limit_occurred": ("warning", "Raspberry Pi temperature limit occurred since boot"),
+        "temperature_high": ("critical", "Raspberry Pi temperature is high"),
+        "disk_space_low": ("critical", "Free disk space is low"),
+        "radio_disconnected": ("critical", "Heltec radio is disconnected"),
+        "database_check_failed": ("critical", "SQLite integrity check failed"),
+        "automatic_backup_failed": ("warning", "The latest automatic backup failed"),
+    }
+
+    async def overview_payload() -> dict:
+        system = await asyncio.to_thread(system_diagnostics, settings.data_dir, list_serial_ports())
+        health = database.health_summary()
+        pending = sum(health["message_statuses"].get(value, 0) for value in ("queued", "sending", "unconfirmed"))
+        codes = list(system.get("warnings", []))
+        if not station.status.get("connected"):
+            codes.append("radio_disconnected")
+        if health["quick_check"] != "ok":
+            codes.append("database_check_failed")
+        if automatic_backups.status().get("last_error"):
+            codes.append("automatic_backup_failed")
+        codes = list(dict.fromkeys(codes))
+        saved = database.get_settings().get("acknowledged_alerts", {})
+        acknowledged = saved if isinstance(saved, dict) else {}
+        active_acknowledged = {code: int(acknowledged[code]) for code in codes if code in acknowledged}
+        if active_acknowledged != acknowledged:
+            database.set_setting("acknowledged_alerts", active_acknowledged)
+        alert_details = []
+        for code in codes:
+            severity, message = alert_metadata.get(code, ("warning", code))
+            alert_details.append({
+                "code": code, "severity": severity, "message": message,
+                "acknowledged_at": active_acknowledged.get(code),
+            })
+        return {
+            "radio": station.status,
+            "system": system,
+            "database": health,
+            "queue_pending": pending,
+            "automatic_backups": automatic_backups.status(),
+            "alerts": codes,
+            "alert_details": alert_details,
+        }
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -241,24 +292,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/system/overview")
     async def system_overview():
-        system = await asyncio.to_thread(system_diagnostics, settings.data_dir, list_serial_ports())
-        health = database.health_summary()
-        pending = sum(health["message_statuses"].get(value, 0) for value in ("queued", "sending", "unconfirmed"))
-        alerts = list(system.get("warnings", []))
-        if not station.status.get("connected"):
-            alerts.append("radio_disconnected")
-        if health["quick_check"] != "ok":
-            alerts.append("database_check_failed")
-        if automatic_backups.status().get("last_error"):
-            alerts.append("automatic_backup_failed")
-        return {
-            "radio": station.status,
-            "system": system,
-            "database": health,
-            "queue_pending": pending,
-            "automatic_backups": automatic_backups.status(),
-            "alerts": alerts,
-        }
+        return await overview_payload()
+
+    @app.post("/api/system/alerts/{code}/acknowledge")
+    async def acknowledge_alert(code: str):
+        overview = await overview_payload()
+        if code not in overview["alerts"]:
+            raise HTTPException(404, "Active alert not found")
+        saved = database.get_settings().get("acknowledged_alerts", {})
+        acknowledged = dict(saved) if isinstance(saved, dict) else {}
+        acknowledged[code] = int(time.time())
+        database.set_setting("acknowledged_alerts", acknowledged)
+        return {"code": code, "acknowledged_at": acknowledged[code]}
+
+    @app.delete("/api/system/alerts/acknowledgements")
+    async def clear_alert_acknowledgements():
+        database.set_setting("acknowledged_alerts", {})
+        return {"ok": True}
+
+    @app.get("/api/system/update-check")
+    async def update_check():
+        try:
+            return await asyncio.to_thread(check_latest_release, __version__)
+        except Exception as exc:
+            raise HTTPException(502, f"Release check failed: {exc}") from exc
 
     @app.post("/api/system/reconnect")
     async def reconnect():
@@ -446,6 +503,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/analytics/links")
     async def link_quality(days: int = Query(7, ge=1, le=365)):
         return database.link_quality(days)
+
+    @app.get("/api/analytics/links/timeseries")
+    async def link_quality_timeseries(
+        days: int = Query(7, ge=1, le=365), contact_id: str | None = Query(None, max_length=128),
+    ):
+        return database.link_quality_series(days, contact_id)
+
+    @app.get("/api/analytics/routes")
+    async def route_history(
+        days: int = Query(7, ge=1, le=365), contact_id: str | None = Query(None, max_length=128),
+        limit: int = Query(200, ge=1, le=2000),
+    ):
+        return database.route_history(days, contact_id, limit)
 
     @app.get("/api/map/config")
     async def map_config():

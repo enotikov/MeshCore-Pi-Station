@@ -632,6 +632,81 @@ class Database:
             },
         }
 
+    def link_quality_series(self, days: int = 7, contact_id: str | None = None) -> dict[str, Any]:
+        """Return bounded RF time buckets for charts; missing measurements stay missing."""
+        since = int(time.time()) - days * 86400
+        bucket_seconds = 3600 if days <= 2 else 21600 if days <= 14 else 86400
+        clauses = ["p.created_at>=?", "p.contact_id IS NOT NULL"]
+        parameters: list[Any] = [since]
+        if contact_id:
+            clauses.append("p.contact_id=?")
+            parameters.append(contact_id)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""SELECT (p.created_at / ?) * ? AS bucket,
+                    p.contact_id, COALESCE(c.name, p.contact_id) AS name,
+                    AVG(CAST(COALESCE(json_extract(p.data_json, '$.metadata.snr'),
+                                      json_extract(p.data_json, '$.snr')) AS REAL)) AS average_snr,
+                    AVG(CAST(COALESCE(json_extract(p.data_json, '$.metadata.rssi'),
+                                      json_extract(p.data_json, '$.rssi')) AS REAL)) AS average_rssi,
+                    SUM(CASE WHEN p.direction='in' THEN 1 ELSE 0 END) AS rx_packets,
+                    SUM(CASE WHEN p.direction='out' THEN 1 ELSE 0 END) AS tx_packets
+                FROM packet_events p LEFT JOIN contacts c ON c.id=p.contact_id
+                WHERE {' AND '.join(clauses)}
+                GROUP BY bucket, p.contact_id ORDER BY bucket, name COLLATE NOCASE""",
+                [bucket_seconds, bucket_seconds, *parameters],
+            ).fetchall()
+        return {
+            "days": days,
+            "since": since,
+            "bucket_seconds": bucket_seconds,
+            "contact_id": contact_id,
+            "series": [
+                {
+                    "bucket": int(row["bucket"]),
+                    "contact_id": str(row["contact_id"]),
+                    "name": str(row["name"]),
+                    "average_snr": round(float(row["average_snr"]), 2) if row["average_snr"] is not None else None,
+                    "average_rssi": round(float(row["average_rssi"]), 2) if row["average_rssi"] is not None else None,
+                    "rx_packets": int(row["rx_packets"] or 0),
+                    "tx_packets": int(row["tx_packets"] or 0),
+                }
+                for row in rows
+            ],
+        }
+
+    def route_history(self, days: int = 7, contact_id: str | None = None, limit: int = 200) -> dict[str, Any]:
+        since = int(time.time()) - days * 86400
+        clauses = ["p.created_at>=?", "p.contact_id IS NOT NULL"]
+        parameters: list[Any] = [since]
+        if contact_id:
+            clauses.append("p.contact_id=?")
+            parameters.append(contact_id)
+        parameters.append(limit)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""SELECT p.id, p.created_at, p.event_type, p.direction, p.contact_id,
+                    COALESCE(c.name, p.contact_id) AS name, p.data_json
+                FROM packet_events p LEFT JOIN contacts c ON c.id=p.contact_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY p.created_at DESC, p.id DESC LIMIT ?""",
+                parameters,
+            ).fetchall()
+        events = []
+        for row in rows:
+            data = json.loads(row["data_json"] or "{}")
+            metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+            route = metadata.get("route", data.get("route"))
+            path = metadata.get("path", metadata.get("path_hash", data.get("path")))
+            hops = metadata.get("path_len", data.get("path_len"))
+            events.append({
+                "id": int(row["id"]), "created_at": int(row["created_at"]),
+                "event_type": str(row["event_type"]), "direction": str(row["direction"]),
+                "contact_id": str(row["contact_id"]), "name": str(row["name"]),
+                "route": route, "path": path, "hops": hops,
+            })
+        return {"days": days, "since": since, "contact_id": contact_id, "events": events}
+
     def search_messages(
         self, query: str = "", status: str = "", since: int | None = None,
         until: int | None = None, limit: int = 100,
