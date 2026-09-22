@@ -24,7 +24,7 @@ jobs:
           python -c "from scripts.build_deb import locked_constraints; from pathlib import Path; Path('constraints.txt').write_text(locked_constraints())"
           pip install -c constraints.txt -e '.[dev]'
       - name: Run tests
-        run: pytest -q
+        run: python -m pytest -q
       - name: Compile Python sources
         run: python -m compileall -q src
       - name: Check JavaScript
