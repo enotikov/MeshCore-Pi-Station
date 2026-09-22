@@ -1,6 +1,6 @@
 # MeshCore Pi Station — English guide
 
-## Upgrading to 1.0.0: initial access and recovery
+## Upgrading to 1.0.1: initial access and recovery
 
 Use your configured password if one already exists. Otherwise, sign in with the configured username (default `meshcore`) and read the initial password on the Raspberry Pi:
 
@@ -20,7 +20,7 @@ Restore merges records without deleting records absent from the backup, stages a
 
 To roll back a restore: stop the service, preserve the current `station.db`, `station.db-wal` and `station.db-shm` separately if present, copy the selected snapshot to `station.db`, ensure stale WAL/SHM files are absent, set ownership to `meshcore:meshcore`, and start the service. Never replace a database while the application is running.
 
-This release was not installed on a physical Raspberry Pi or tested with a physical Heltec during preparation.
+Version 1.0.1 was installed and tested on a physical Raspberry Pi running Debian 13. A Heltec V4 was backed up, flashed with official USB Companion 1.17.1 firmware and connected over USB serial. RF messaging and regional radio settings still require separate validation.
 
 ## Purpose
 
@@ -28,7 +28,7 @@ MeshCore Pi Station turns a Raspberry Pi into a local control station for a Mesh
 
 The application can flash a Heltec V4 over USB from the Settings page. It starts in simulator mode and firmware flashing is disabled by default for safety; enable it after configuring HTTPS and password authentication. Once compatible Companion Firmware is installed, the Heltec can be used over USB or Bluetooth Low Energy.
 
-## Version 1.0.0 features
+## Version 1.0.1 features
 
 - persistent Russian and English interfaces;
 - direct and channel messages with local SQLite history;
@@ -77,11 +77,15 @@ The application can flash a Heltec V4 over USB from the Settings page. It starts
 
 ```bash
 sudo apt update
-sudo apt install ./meshcore-pi-station_1.0.0_all.deb
+sudo apt install ./meshcore-pi-station_1.0.1_all.deb
 sudo systemctl status meshcore-pi-station
 ```
 
+The installer uses dependency versions pinned by the release. It builds a new virtual environment separately and replaces the active environment only after a successful smoke test; a failed service start restores the previous environment. Access to PyPI is still required to download dependencies during installation.
+
 Open `http://<raspberry-pi-ip>:8080`; use `hostname -I` to find the address. The service initially uses its simulator, so it can be verified without a Heltec. Configure protected access and enable flashing as described below when you are ready to install firmware.
+
+Source installation uses the same package installer: run `sudo bash scripts/install.sh` from the repository. The previous environment is retained under `/opt/meshcore-pi-station/` for manual recovery. Failed activation restores the environment, but does not roll back Debian package metadata or database changes.
 
 ## Connect a USB Companion Radio
 
@@ -102,7 +106,7 @@ sudo systemctl restart meshcore-pi-station
 sudo journalctl -u meshcore-pi-station -f
 ```
 
-The `meshcore` service account is automatically added to the `dialout` group.
+The `meshcore` service account is automatically added to `dialout`, plus `plugdev` for ESP32-S3 native USB and `video` for Raspberry Pi power diagnostics when those groups exist.
 
 ## Flash Heltec V4 from the web interface
 
@@ -170,7 +174,7 @@ After restarting, MBTiles takes priority over the online basemap. Do not bulk-do
 
 ## Setup wizard and message queue
 
-On first launch, version 1.0.0 asks for the language, USB/BLE/simulator transport, device address, username, password and local HTTPS. The wizard writes `/var/lib/meshcore-pi-station/station.json` with mode `0600`; this file takes priority for wizard-managed values. Delete it to return to `/etc/default/meshcore-pi-station`. Password changes take effect immediately and require signing in again. Restart the service after changing the transport or HTTPS.
+On first launch, version 1.0.1 asks for the language, USB/BLE/simulator transport, device address, username, password and local HTTPS. The wizard writes `/var/lib/meshcore-pi-station/station.json` with mode `0600`; this file takes priority for wizard-managed values. Delete it to return to `/etc/default/meshcore-pi-station`. Password changes take effect immediately and require signing in again. Restart the service after changing the transport or HTTPS.
 
 When the Companion is unavailable, outgoing messages remain queued in SQLite. The station sends them after reconnection if they have not expired. Uncertain results require manual retry. Each message card shows its complete delivery timeline and per-attempt error details.
 

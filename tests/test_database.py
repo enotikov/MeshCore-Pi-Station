@@ -61,3 +61,54 @@ def test_interrupted_send_is_recovered_after_restart(tmp_path: Path):
     assert recovered["status"] == "unconfirmed"
     assert recovered["timeline"][-1]["detail"] == "Станция была перезапущена"
     reopened.close()
+
+
+def test_export_uses_batched_timelines_and_returns_complete_snapshot(tmp_path: Path, monkeypatch):
+    db = Database(tmp_path / "export.db")
+    db.initialize()
+    message = db.add_message(
+        target_type="channel", target_id="0", direction="in", text="hello", status="received"
+    )
+
+    def unexpected_timeline_query(_message_id: int):
+        raise AssertionError("export must not query one timeline per message")
+
+    monkeypatch.setattr(db, "message_timeline", unexpected_timeline_query)
+    exported = db.export_data()
+    assert exported["messages"][0]["id"] == message["id"]
+    assert exported["messages"][0]["timeline"][0]["status"] == "received"
+    db.close()
+
+def test_snapshot_readers_close_connections_and_allow_writes(tmp_path, monkeypatch):
+    import sqlite3
+    import threading
+    import meshcore_station.database as database_module
+
+    db = Database(tmp_path / 'snapshot.db')
+    db.initialize()
+    real_connect = sqlite3.connect
+    snapshots = []
+    def connect(*args, **kwargs):
+        connection = real_connect(*args, check_same_thread=False, **kwargs)
+        snapshots.append(connection)
+        return connection
+    monkeypatch.setattr(database_module.sqlite3, 'connect', connect)
+    try:
+        # Holding the live lock must not stall a snapshot reader.
+        with db._lock:
+            result = []
+            thread = threading.Thread(target=lambda: result.append(db.export_data()))
+            thread.start()
+            thread.join(timeout=3)
+        thread.join(timeout=3)
+        assert result and not thread.is_alive()
+        assert db.health_summary()['quick_check'] == 'ok'
+        for connection in snapshots:
+            try:
+                connection.execute('SELECT 1')
+            except sqlite3.ProgrammingError as exc:
+                assert 'closed' in str(exc)
+            else:
+                raise AssertionError('snapshot connection leaked')
+    finally:
+        db.close()

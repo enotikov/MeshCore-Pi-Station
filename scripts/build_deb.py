@@ -16,6 +16,20 @@ ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = "meshcore-pi-station"
 
 
+def locked_constraints() -> str:
+    """Export deterministic pip constraints from the committed uv lock file."""
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    versions: dict[str, set[str]] = {}
+    for package in lock.get("package", []):
+        name, version = package.get("name"), package.get("version")
+        if name and version and name != APP_NAME and package.get("source", {}).get("registry"):
+            versions.setdefault(str(name), set()).add(str(version))
+    conflicting = {name: values for name, values in versions.items() if len(values) != 1}
+    if conflicting:
+        raise ValueError(f"uv.lock contains ambiguous package versions: {conflicting}")
+    return "".join(f"{name}=={next(iter(values))}\n" for name, values in sorted(versions.items()))
+
+
 def add_tree(archive: tarfile.TarFile, source: Path, destination: str) -> None:
     for path in [source, *sorted(source.rglob("*"))]:
         target = Path(destination, path.relative_to(source)).as_posix()
@@ -65,22 +79,7 @@ def build() -> Path:
     output_dir = ROOT / "dist"
     output_dir.mkdir(exist_ok=True)
     package_path = output_dir / f"{APP_NAME}_{version}_all.deb"
-    postinst = """#!/bin/sh
-set -e
-APP_DIR=/usr/lib/meshcore-pi-station
-VENV_DIR=/opt/meshcore-pi-station/.venv
-DATA_DIR=/var/lib/meshcore-pi-station
-python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || { echo 'MeshCore Pi Station requires Python 3.11+ (Raspberry Pi OS Bookworm).' >&2; exit 1; }
-if ! id meshcore >/dev/null 2>&1; then adduser --system --group --home "$DATA_DIR" --no-create-home meshcore; fi
-if getent group dialout >/dev/null 2>&1; then usermod -a -G dialout meshcore; fi
-install -d -m 0755 /opt/meshcore-pi-station
-install -d -o meshcore -g meshcore -m 0750 "$DATA_DIR" "$DATA_DIR/maps"
-python3 -m venv "$VENV_DIR"
-"$VENV_DIR/bin/pip" install --disable-pip-version-check --upgrade pip
-"$VENV_DIR/bin/pip" install --disable-pip-version-check --upgrade "$APP_DIR"
-if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload; systemctl enable meshcore-pi-station.service; systemctl restart meshcore-pi-station.service; fi
-exit 0
-"""
+    postinst = (ROOT / "deploy/postinst.sh").read_text(encoding="utf-8")
     prerm = """#!/bin/sh
 set -e
 if [ "$1" = remove ] && command -v systemctl >/dev/null 2>&1; then systemctl stop meshcore-pi-station.service || true; systemctl disable meshcore-pi-station.service || true; fi
@@ -116,12 +115,13 @@ Description: Bilingual Raspberry Pi web companion for MeshCore radios
         shutil.copytree(ROOT / "scripts", app / "scripts", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         for name in ("pyproject.toml", "README.md", "README_RU.md", "README_EN.md", "CHANGELOG.md", "LICENSE"):
             shutil.copy2(ROOT / name, app / name)
+        (app / "constraints.txt").write_text(locked_constraints(), encoding="utf-8", newline="\n")
         data_files = {"lib/systemd/system/meshcore-pi-station.service": ((ROOT / "deploy/meshcore-pi-station.service").read_bytes(), 0o644), "etc/default/meshcore-pi-station": ((ROOT / "deploy/meshcore-pi-station.default").read_bytes(), 0o640)}
         data_tar = make_tar(data_files, [(app, "usr/lib/meshcore-pi-station")])
     write_ar(package_path, [("debian-binary", b"2.0\n"), ("control.tar.gz", control_tar), ("data.tar.gz", data_tar)])
     digest = hashlib.sha256(package_path.read_bytes()).hexdigest()
     package_path.with_suffix(package_path.suffix + ".sha256").write_text(
-        f"{digest}  {package_path.name}\n", encoding="ascii"
+        f"{digest}  {package_path.name}\n", encoding="ascii", newline="\n"
     )
     return package_path
 

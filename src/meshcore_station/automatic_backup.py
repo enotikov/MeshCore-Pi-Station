@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ class AutomaticBackupManager:
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._lock = asyncio.Lock()
+        self._sequence = 0
         self.last_error = ""
 
     def policy(self) -> dict[str, Any]:
@@ -65,7 +67,11 @@ class AutomaticBackupManager:
     def create(self) -> dict[str, Any]:
         self._ensure_directory()
         timestamp = int(time.time())
-        name = time.strftime("station-%Y%m%d-%H%M%S", time.localtime(timestamp)) + f"-{time.time_ns() % 1_000_000_000:09d}.mcpsa"
+        self._sequence += 1
+        name = (
+            time.strftime("station-%Y%m%d-%H%M%S", time.localtime(timestamp))
+            + f"-{time.time_ns():020d}-{self._sequence:06d}-{uuid.uuid4().hex[:12]}.mcpsa"
+        )
         target = self.directory / name
         nonce = os.urandom(12)
         plaintext = json.dumps(self.database.export_data(), ensure_ascii=False).encode("utf-8")

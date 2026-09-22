@@ -1,6 +1,6 @@
 // Never cache authenticated HTML or API responses.
-const CACHE = "meshcore-pi-station-v19";
-const SHELL = ["/static/styles.css?v=19", "/static/app.js?v=19", "/static/icon.svg"];
+const CACHE = "meshcore-pi-station-v20";
+const SHELL = ["/static/styles.css?v=20", "/static/app.js?v=20", "/static/icon.svg"];
 
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));

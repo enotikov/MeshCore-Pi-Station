@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.1 — 2026-09-22
+
+- Fixed blocked OpenStreetMap tiles by allowing origin-only cross-origin referrers instead of suppressing Referer.
+
+- Moved database integrity checks, backup export, encryption and restore work off the async event loop.
+- Made exports transactionally consistent and replaced per-message timeline queries with one batched query.
+- Neutralized spreadsheet formulas in CSV exports and bounded the live browser packet list.
+- Made automatic-backup filenames collision-resistant and monotonically sortable.
+- Pinned Debian installation dependencies from `uv.lock` and made virtual-environment upgrades rollback-safe.
+- Unified source installation with the Debian installer; preserve permanent venv paths and restore previous environments on activation failure.
+- Added `plugdev` access for ESP32-S3 USB serial and `video` access for Raspberry Pi voltage/throttling diagnostics.
+- Explicitly restricted the systemd state directory to 0750 and new service files to a private umask (0077).
+- Added Debian control-script validation and regression tests for the corrected paths.
+
 ## 1.0.0 — 2026-09-05
 
 - Added an acknowledgeable notification center for active station warnings.

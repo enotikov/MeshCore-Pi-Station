@@ -6,6 +6,7 @@ import threading
 import time
 import tempfile
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -497,27 +498,48 @@ class Database:
         return {row["key"]: json.loads(row["value"]) for row in rows}
 
     def export_data(self) -> dict[str, Any]:
-        with self._lock:
-            channel_rows = self._connection.execute(
+        """Return a consistent snapshot without blocking writes to the live connection."""
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as snapshot:
+            snapshot.row_factory = sqlite3.Row
+            snapshot.execute("PRAGMA query_only=ON")
+            snapshot.execute("BEGIN")
+            contact_rows = snapshot.execute(
+                "SELECT * FROM contacts ORDER BY favorite DESC, unread DESC, name COLLATE NOCASE"
+            ).fetchall()
+            channel_rows = snapshot.execute(
                 "SELECT id, name, enabled, secret, region_scope FROM channels ORDER BY id"
             ).fetchall()
-        return {
-            "version": 1,
-            "exported_at": int(time.time()),
-            "contacts": self.list_contacts(),
-            "channels": [dict(row) for row in channel_rows],
-            "messages": self._all_messages(),
-            "settings": self.get_settings(),
-        }
+            setting_rows = snapshot.execute("SELECT key, value FROM settings").fetchall()
+            return {
+                "version": 1,
+                "exported_at": int(time.time()),
+                "contacts": [self._contact_row(row) for row in contact_rows],
+                "channels": [dict(row) for row in channel_rows],
+                "messages": self._all_messages(snapshot),
+                "settings": {row["key"]: json.loads(row["value"]) for row in setting_rows},
+            }
 
-    def _all_messages(self) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self._connection.execute("SELECT * FROM messages ORDER BY id").fetchall()
+    @staticmethod
+    def _all_messages(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+        rows = connection.execute("SELECT * FROM messages ORDER BY id").fetchall()
+        timeline_rows = connection.execute(
+            "SELECT message_id, status, created_at, detail "
+            "FROM message_status_events ORDER BY message_id, id"
+        ).fetchall()
+        timelines: dict[int, list[dict[str, Any]]] = {}
+        for row in timeline_rows:
+            timelines.setdefault(int(row["message_id"]), []).append(
+                {
+                    "status": row["status"],
+                    "created_at": row["created_at"],
+                    "detail": row["detail"],
+                }
+            )
         result = []
         for row in rows:
             item = dict(row)
             item["metadata"] = json.loads(item.pop("metadata_json"))
-            item["timeline"] = self.message_timeline(int(item["id"]))
+            item["timeline"] = timelines.get(int(item["id"]), [])
             result.append(item)
         return result
 
@@ -744,17 +766,20 @@ class Database:
         return result
 
     def health_summary(self) -> dict[str, Any]:
-        with self._lock:
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as snapshot:
+            snapshot.row_factory = sqlite3.Row
+            snapshot.execute("PRAGMA query_only=ON")
+            snapshot.execute("BEGIN")
             message_statuses = {
-                row["status"]: row["count"] for row in self._connection.execute(
+                row["status"]: row["count"] for row in snapshot.execute(
                     "SELECT status, COUNT(*) AS count FROM messages GROUP BY status"
                 ).fetchall()
             }
             counts = {
-                table: int(self._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                table: int(snapshot.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
                 for table in ("contacts", "channels", "messages", "packet_events", "stats_samples")
             }
-            quick_check = str(self._connection.execute("PRAGMA quick_check").fetchone()[0])
+            quick_check = str(snapshot.execute("PRAGMA quick_check").fetchone()[0])
         return {"counts": counts, "message_statuses": message_statuses, "quick_check": quick_check}
 
     def import_data(self, data: dict[str, Any]) -> dict[str, int]:

@@ -7,7 +7,7 @@
   <title>MeshCore Pi Station</title>
   <link rel="manifest" id="manifest-link" href="/static/manifest.json">
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/styles.css?v=19">
+  <link rel="stylesheet" href="/static/styles.css?v=20">
 </head>
 <body>
   <div class="shell">
@@ -50,6 +50,6 @@
   <dialog id="share-dialog"><div class="dialog-head"><strong>MeshCore QR</strong><button data-close>×</button></div><div class="share-body"><img id="share-qr" alt="QR-код"><textarea id="share-uri" readonly></textarea><button class="primary" id="copy-uri">Копировать</button></div></dialog>
   <dialog id="setup-dialog"><div class="dialog-head"><strong>Первоначальная настройка</strong><button data-close>×</button></div><form id="setup-form" class="dialog-form"><label>Язык<select name="language"><option value="ru">Русский</option><option value="en">English</option></select></label><label>Подключение<select name="transport"><option value="serial">USB Serial</option><option value="ble">Bluetooth LE</option><option value="mock">Симулятор</option></select></label><label>USB-порт<input name="serial_port" value="auto" list="setup-ports"></label><datalist id="setup-ports"></datalist><label>BLE-адрес<input name="ble_address" value="auto" placeholder="auto или MAC"></label><label>BLE PIN<input name="ble_pin" autocomplete="off"></label><label>Пользователь<input name="web_username" value="meshcore" required></label><label>Новый пароль<input name="web_password" type="password" minlength="12" placeholder="Не менее 12 символов"></label><label><input name="enable_https" type="checkbox"> Создать локальный HTTPS-сертификат</label><p class="warning">Пароль действует сразу. Для подключения и HTTPS перезапустите службу.</p><button class="primary">Сохранить настройку</button></form></dialog>
   <dialog id="history-search-dialog"><div class="dialog-head"><strong>Поиск по сообщениям</strong><button data-close>×</button></div><form id="history-search-form" class="search-filters"><input name="q" maxlength="160" placeholder="Текст или название узла"><select name="status"><option value="">Все статусы</option><option value="received">Получено</option><option value="delivered">Доставлено</option><option value="sent">Отправлено</option><option value="queued">В очереди</option><option value="unconfirmed">Не подтверждено</option><option value="failed">Ошибка</option><option value="expired">Срок истёк</option><option value="cancelled">Отменено</option></select><label>С <input name="since" type="date"></label><label>По <input name="until" type="date"></label><button class="primary">Найти</button></form><div id="history-search-results" class="search-results"><div class="empty-state"><p>Введите запрос или выберите фильтр</p></div></div></dialog>
-  <div class="toast" id="toast"></div><script src="/static/app.js?v=19" defer></script>
+  <div class="toast" id="toast"></div><script src="/static/app.js?v=20" defer></script>
 </body>
 </html>

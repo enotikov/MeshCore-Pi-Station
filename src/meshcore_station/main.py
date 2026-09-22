@@ -118,7 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     async def overview_payload() -> dict:
         system = await asyncio.to_thread(system_diagnostics, settings.data_dir, list_serial_ports())
-        health = database.health_summary()
+        health = await asyncio.to_thread(database.health_summary)
         pending = sum(health["message_statuses"].get(value, 0) for value in ("queued", "sending", "unconfirmed"))
         codes = list(system.get("warnings", []))
         if not station.status.get("connected"):
@@ -197,7 +197,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        # Browser tile providers require a Referer; cross-origin requests disclose only the origin.
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Cache-Control"] = "no-store"
         if request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
@@ -341,7 +342,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "privacy": "No messages, coordinates, passwords, channel secrets, TLS keys or BLE PINs included.",
             "radio": safe_radio,
             "system": system,
-            "database": database.health_summary(),
+            "database": await asyncio.to_thread(database.health_summary),
             "automatic_backups": {
                 key: automatic_backups.status().get(key)
                 for key in ("enabled", "interval_hours", "retain_count", "last_at", "next_at", "last_error")
@@ -733,8 +734,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/backup")
     async def backup():
-        return JSONResponse(
-            database.export_data(),
+        payload = await asyncio.to_thread(
+            lambda: json.dumps(database.export_data(), ensure_ascii=False).encode("utf-8")
+        )
+        return Response(
+            payload,
+            media_type="application/json; charset=utf-8",
             headers={"Content-Disposition": "attachment; filename=meshcore-pi-station-backup.json"},
         )
 
@@ -742,7 +747,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def restore_backup(request: BackupImportRequest):
         try:
             async with station._send_lock:
-                result = database.import_data(request.data)
+                result = await asyncio.to_thread(database.import_data, request.data)
             await station.broadcast("database_changed", result)
             return result
         except (ValueError, KeyError, TypeError, sqlite3.Error) as exc:
@@ -762,30 +767,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt,
                          iterations=600_000).derive(password.encode("utf-8"))
 
-    @app.post("/api/backup/encrypted")
-    async def encrypted_backup(request: EncryptedBackupRequest):
+    def encrypt_backup(data: dict, password: str) -> bytes:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         salt, nonce = os.urandom(16), os.urandom(12)
-        plaintext = json.dumps(database.export_data(), ensure_ascii=False).encode("utf-8")
-        encrypted = AESGCM(backup_key(request.password, salt)).encrypt(nonce, plaintext, b"MCPS1")
-        payload = b"MCPS1" + salt + nonce + encrypted
+        plaintext = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        encrypted = AESGCM(backup_key(password, salt)).encrypt(nonce, plaintext, b"MCPS1")
+        return b"MCPS1" + salt + nonce + encrypted
+
+    def decrypt_backup(payload_base64: str, password: str) -> dict:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        payload = base64.b64decode(payload_base64, validate=True)
+        if payload[:5] != b"MCPS1" or len(payload) < 50:
+            raise ValueError("Некорректный формат зашифрованного backup")
+        salt, nonce, encrypted = payload[5:21], payload[21:33], payload[33:]
+        plaintext = AESGCM(backup_key(password, salt)).decrypt(nonce, encrypted, b"MCPS1")
+        result = json.loads(plaintext)
+        if not isinstance(result, dict):
+            raise ValueError("Некорректный формат зашифрованного backup")
+        return result
+
+    @app.post("/api/backup/encrypted")
+    async def encrypted_backup(request: EncryptedBackupRequest):
+        payload = await asyncio.to_thread(
+            lambda: encrypt_backup(database.export_data(), request.password)
+        )
         return Response(payload, media_type="application/octet-stream",
                         headers={"Content-Disposition": "attachment; filename=meshcore-backup.mcps"})
 
     @app.post("/api/backup/restore-encrypted")
     async def restore_encrypted(request: EncryptedRestoreRequest):
         from cryptography.exceptions import InvalidTag
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         try:
-            payload = base64.b64decode(request.payload_base64, validate=True)
-            if payload[:5] != b"MCPS1" or len(payload) < 50:
-                raise ValueError("Некорректный формат зашифрованного backup")
-            salt, nonce, encrypted = payload[5:21], payload[21:33], payload[33:]
-            plaintext = AESGCM(backup_key(request.password, salt)).decrypt(nonce, encrypted, b"MCPS1")
+            data = await asyncio.to_thread(
+                decrypt_backup, request.payload_base64, request.password
+            )
             async with station._send_lock:
-                result = database.import_data(json.loads(plaintext))
+                result = await asyncio.to_thread(database.import_data, data)
             await station.broadcast("database_changed", result)
             return result
         except (ValueError, InvalidTag, KeyError, TypeError, sqlite3.Error) as exc:
@@ -819,7 +839,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             data = await asyncio.to_thread(automatic_backups.decode, name)
             async with station._send_lock:
-                result = database.import_data(data)
+                result = await asyncio.to_thread(database.import_data, data)
             await station.broadcast("database_changed", result)
             return result
         except FileNotFoundError as exc:
@@ -829,16 +849,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/identity/backup")
     async def identity_backup(request: IdentityBackupRequest):
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
         if request.confirmation != "EXPORT IDENTITY":
             raise HTTPException(400, "Введите точную фразу EXPORT IDENTITY")
         try:
             identity = await transport.export_identity()
-            salt, nonce = os.urandom(16), os.urandom(12)
-            plaintext = json.dumps(identity, ensure_ascii=False).encode("utf-8")
-            encrypted = AESGCM(backup_key(request.password, salt)).encrypt(nonce, plaintext, b"MCID1")
-            return Response(b"MCID1" + salt + nonce + encrypted,
+            def encrypt_identity() -> bytes:
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+                salt, nonce = os.urandom(16), os.urandom(12)
+                plaintext = json.dumps(identity, ensure_ascii=False).encode("utf-8")
+                encrypted = AESGCM(backup_key(request.password, salt)).encrypt(
+                    nonce, plaintext, b"MCID1"
+                )
+                return b"MCID1" + salt + nonce + encrypted
+
+            payload = await asyncio.to_thread(encrypt_identity)
+            return Response(payload,
                             media_type="application/octet-stream",
                             headers={"Content-Disposition": "attachment; filename=meshcore-identity.mcid"})
         except Exception as exc:
@@ -846,12 +872,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/messages.csv")
     async def export_messages():
-        output = io.StringIO()
-        rows = database.export_data()["messages"]
-        writer = csv.DictWriter(output, fieldnames=["created_at", "target_type", "target_id", "direction", "status", "text", "radio_id"], extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
-        return Response(output.getvalue(), media_type="text/csv; charset=utf-8",
+        def build_csv() -> str:
+            output = io.StringIO()
+            rows = database.export_data()["messages"]
+            fields = ["created_at", "target_type", "target_id", "direction", "status", "text", "radio_id"]
+            writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                safe = {
+                    key: f"'{value}" if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")) else value
+                    for key, value in row.items()
+                }
+                writer.writerow(safe)
+            return output.getvalue()
+
+        payload = await asyncio.to_thread(build_csv)
+        return Response(payload, media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": "attachment; filename=meshcore-messages.csv"})
 
     @app.post("/api/mock/incoming")

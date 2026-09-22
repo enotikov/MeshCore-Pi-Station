@@ -3,10 +3,12 @@ from dataclasses import replace
 
 from fastapi.testclient import TestClient
 
+from meshcore_station import __version__
 import meshcore_station.main as main_module
 from meshcore_station.database import Database
 from meshcore_station.main import create_app
 from meshcore_station.updates import parse_release, version_tuple
+from scripts.build_deb import locked_constraints
 from test_api import settings
 
 
@@ -46,6 +48,13 @@ def test_release_parser_accepts_only_semver_and_safe_assets():
     assert version_tuple("v1.0.0") == (1, 0, 0)
 
 
+def test_debian_package_uses_locked_dependency_versions():
+    constraints = locked_constraints().splitlines()
+    assert any(item.startswith("fastapi==") for item in constraints)
+    assert any(item.startswith("meshcore==") for item in constraints)
+    assert all("meshcore-pi-station" not in item for item in constraints)
+
+
 def test_alert_acknowledgement_analytics_and_update_api(monkeypatch, tmp_path):
     original_diagnostics = main_module.system_diagnostics
 
@@ -73,5 +82,5 @@ def test_alert_acknowledgement_analytics_and_update_api(monkeypatch, tmp_path):
         assert client.get("/api/analytics/links/timeseries", params={"days": 0}).status_code == 422
         assert client.get("/api/analytics/routes", params={"limit": 0}).status_code == 422
         update = client.get("/api/system/update-check").json()
-        assert update["current_version"] == "1.0.0"
+        assert update["current_version"] == __version__
         assert update["update_available"] is False

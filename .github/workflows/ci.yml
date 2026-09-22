@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,19 +20,41 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install project
-        run: pip install -e '.[dev]'
+        run: |
+          python -c "from scripts.build_deb import locked_constraints; from pathlib import Path; Path('constraints.txt').write_text(locked_constraints())"
+          pip install -c constraints.txt -e '.[dev]'
       - name: Run tests
         run: pytest -q
+      - name: Compile Python sources
+        run: python -m compileall -q src
       - name: Check JavaScript
         run: node --check src/meshcore_station/static/app.js
+      - name: Read package version
+        id: version
+        run: echo "value=$(python -c 'import meshcore_station; print(meshcore_station.__version__)')" >> "$GITHUB_OUTPUT"
       - name: Build Debian package
         if: matrix.python-version == '3.11'
         run: python scripts/build_deb.py
+      - name: Validate Debian package
+        if: matrix.python-version == '3.11'
+        run: |
+          package="dist/meshcore-pi-station_$(python -c 'import meshcore_station; print(meshcore_station.__version__)')_all.deb"
+          test -n "$package"
+          dpkg-deb --info "$package"
+          dpkg-deb --contents "$package" > package-contents.txt
+          grep -q 'usr/lib/meshcore-pi-station/constraints.txt' package-contents.txt
+          control_dir="$(mktemp -d)"
+          dpkg-deb --control "$package" "$control_dir"
+          dash -n "$control_dir/postinst"
+          dash -n "$control_dir/prerm"
+          dash -n "$control_dir/postrm"
+          bash -n scripts/install.sh
+          (cd dist && sha256sum -c "$(basename "$package").sha256")
       - name: Upload Debian package
         if: matrix.python-version == '3.11'
         uses: actions/upload-artifact@v4
         with:
           name: meshcore-pi-station-deb
           path: |
-            dist/*.deb
-            dist/*.sha256
+            dist/*_${{ steps.version.outputs.value }}_all.deb
+            dist/*_${{ steps.version.outputs.value }}_all.deb.sha256

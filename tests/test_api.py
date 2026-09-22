@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import csv
+import io
 from dataclasses import replace
 from pathlib import Path
 
@@ -86,6 +88,20 @@ def test_rejects_long_message(tmp_path: Path):
             json={"target_type": "channel", "target_id": "0", "text": "x" * 161},
         )
         assert response.status_code == 422
+
+
+def test_csv_export_neutralises_spreadsheet_formulas(tmp_path: Path):
+    with TestClient(create_app(settings(tmp_path))) as client:
+        contact_id = client.get("/api/contacts").json()[0]["id"]
+        response = client.post(
+            "/api/mock/incoming",
+            json={"target_type": "contact", "target_id": contact_id, "text": "=HYPERLINK(\"https://example.invalid\")"},
+        )
+        assert response.status_code == 200
+        exported = client.get("/api/messages.csv")
+        assert exported.status_code == 200
+        rows = list(csv.DictReader(io.StringIO(exported.text)))
+        assert rows[-1]["text"].startswith("'=")
 
 
 def test_radio_reconnects_after_initial_failure(tmp_path: Path):
@@ -294,3 +310,28 @@ def test_message_is_queued_while_radio_is_offline(tmp_path: Path):
         database.close()
 
     asyncio.run(scenario())
+
+def test_health_endpoints_run_database_checks_outside_event_loop(tmp_path, monkeypatch):
+    from meshcore_station.database import Database
+    original = Database.health_summary
+    calls = []
+    def health(database):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            calls.append(True)
+        else:
+            raise AssertionError('Database health blocks the request event loop')
+        return original(database)
+    monkeypatch.setattr(Database, 'health_summary', health)
+    with TestClient(create_app(settings(tmp_path))) as client:
+        assert client.get('/api/system/overview').status_code == 200
+        assert client.get('/api/system/support-report').status_code == 200
+    assert len(calls) == 2
+
+def test_map_page_allows_origin_referrer_for_external_tiles(tmp_path):
+    with TestClient(create_app(settings(tmp_path))) as client:
+        response = client.get('/')
+        assert response.status_code == 200
+        assert response.headers['Referrer-Policy'] == 'strict-origin-when-cross-origin'
+        assert client.get('/api/map/config').json()['tile_url'] == 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
