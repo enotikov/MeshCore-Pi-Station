@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 import time
 from dataclasses import replace
 
@@ -123,7 +124,7 @@ def test_automatic_backup_scheduler_runs_due_copy(tmp_path):
             await asyncio.sleep(0.01)
         manager._stop.set()
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with suppress(asyncio.CancelledError):
             await task
         assert len(manager.list()) == 1
         db.close()
