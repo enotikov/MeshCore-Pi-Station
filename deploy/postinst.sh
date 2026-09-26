@@ -54,6 +54,7 @@ python3 -m venv "$NEW"
 "$NEW/bin/python" -m pip check
 if systemctl is-active --quiet "$SERVICE"; then WAS_ACTIVE=1; fi
 if [ -L "$VENV_DIR" ]; then OLD="$(readlink "$VENV_DIR")"; fi
+case "$OLD" in ""|/*) ;; *) OLD="$BASE_DIR/$OLD" ;; esac
 systemctl stop "$SERVICE"
 SWITCHING=1
 if [ -d "$VENV_DIR" ] && [ ! -L "$VENV_DIR" ]; then mv -- "$VENV_DIR" "$LEGACY"; fi
@@ -67,8 +68,14 @@ for attempt in 1 2 3; do
     sleep 2
     systemctl is-active --quiet "$SERVICE"
 done
-# Retain the previous environment for manual recovery; never prune user paths.
+# Retain the previous environment for manual recovery; prune only older
+# release environments created by this script, never user paths.
 SWITCHING=0
+for release in "$BASE_DIR"/.venv.release.*; do
+    [ -d "$release" ] && [ ! -L "$release" ] || continue
+    [ "$release" = "$NEW" ] || [ "$release" = "$OLD" ] && continue
+    rm -rf -- "$release"
+done
 NEW=""
 trap - EXIT HUP INT TERM
 exit 0

@@ -39,6 +39,8 @@ class StationService:
         self._maintenance_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._connection_attempt = 0
+        self._connecting = False
+        self._ack_tasks: dict[asyncio.Task[None], int] = {}
 
     @property
     def status(self) -> dict[str, Any]:
@@ -46,15 +48,28 @@ class StationService:
 
     async def start(self) -> None:
         self.database.initialize()
-        connected = await self._connect()
-        if not connected:
-            self._reconnect_task = asyncio.create_task(
-                self._reconnect_loop(), name="meshcore-radio-reconnect"
-            )
+        if not await self._connect():
+            self._schedule_reconnect()
         self._stats_task = asyncio.create_task(self._stats_loop(), name="meshcore-stats")
         self._queue_task = asyncio.create_task(self._queue_loop(), name="meshcore-message-queue")
 
+    def _schedule_reconnect(self) -> None:
+        if self._stop_event.is_set() or self._maintenance:
+            return
+        if self._reconnect_task and not self._reconnect_task.done():
+            return
+        self._reconnect_task = asyncio.create_task(
+            self._reconnect_loop(), name="meshcore-radio-reconnect"
+        )
+
     async def _connect(self) -> bool:
+        self._connecting = True
+        try:
+            return await self._connect_once()
+        finally:
+            self._connecting = False
+
+    async def _connect_once(self) -> bool:
         self._connection_attempt += 1
         self._state = {
             "starting": True, "connected": False, "connection_state": "connecting",
@@ -120,9 +135,7 @@ class StationService:
             self._maintenance = False
             self._state.pop("maintenance", None)
             if not await self._connect():
-                self._reconnect_task = asyncio.create_task(
-                    self._reconnect_loop(), name="meshcore-radio-reconnect"
-                )
+                self._schedule_reconnect()
 
     async def reconnect_radio(self) -> dict[str, Any]:
         async with self._maintenance_lock:
@@ -137,13 +150,26 @@ class StationService:
                 self._reconnect_task = None
             await self.transport.stop()
             if not await self._connect():
-                self._reconnect_task = asyncio.create_task(
-                    self._reconnect_loop(), name="meshcore-radio-reconnect"
-                )
+                self._schedule_reconnect()
             return self.status
 
     async def stop(self) -> None:
         self._stop_event.set()
+        pending_acks = dict(self._ack_tasks)
+        for task in pending_acks:
+            task.cancel()
+        for task, message_id in pending_acks.items():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            try:
+                if self.database.get_message(message_id)["status"] == "sent":
+                    self.database.update_message(
+                        message_id, "unconfirmed", error="Станция остановлена до получения подтверждения"
+                    )
+            except Exception:
+                logger.exception("Unable to record interrupted ACK wait")
         for task in (self._reconnect_task, self._stats_task, self._queue_task):
             if task:
                 task.cancel()
@@ -183,17 +209,24 @@ class StationService:
 
     async def _queue_loop(self) -> None:
         while not self._stop_event.is_set():
-            for message in self.database.expire_queued_messages():
-                await self.broadcast("message", message)
-            if self.status.get("connected") and not self._maintenance:
-                for message in self.database.queued_messages():
-                    await self._deliver_message(message)
-                    if not self.status.get("connected"):
-                        break
+            try:
+                await self._process_queue()
+            except Exception:
+                # A single bad record or transient database error must not stop the queue forever.
+                logger.exception("Outgoing message queue iteration failed")
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.message_retry_seconds)
             except TimeoutError:
                 pass
+
+    async def _process_queue(self) -> None:
+        for message in self.database.expire_queued_messages():
+            await self.broadcast("message", message)
+        if self.status.get("connected") and not self._maintenance:
+            for message in self.database.queued_messages():
+                await self._deliver_message(message)
+                if not self.status.get("connected"):
+                    break
 
     async def update_device(self, values: dict[str, Any]) -> dict[str, Any]:
         result = await self.transport.update_device(values)
@@ -267,6 +300,13 @@ class StationService:
                 message = self.database.update_message(
                     message["id"], result.get("status", "sent"), result.get("radio_id")
                 )
+                if result.get("ack_timeout") and result.get("radio_id") and message["status"] == "sent":
+                    task = asyncio.create_task(
+                        self._await_ack(int(message["id"]), str(result["radio_id"]), float(result["ack_timeout"])),
+                        name=f"meshcore-ack-{message['id']}",
+                    )
+                    self._ack_tasks[task] = int(message["id"])
+                    task.add_done_callback(lambda done: self._ack_tasks.pop(done, None))
             except Exception as exc:
                 # Once handed to a transport, an exception cannot prove no RF send occurred.
                 message = self.database.update_message(
@@ -282,11 +322,38 @@ class StationService:
             await self.broadcast("packet", packet)
             return message
 
+    async def _await_ack(self, message_id: int, radio_id: str, timeout: float) -> None:
+        """Resolve a sent direct message to delivered/unconfirmed without blocking the queue."""
+        try:
+            acknowledged = await self.transport.wait_for_ack(radio_id, timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("ACK wait failed")
+            acknowledged = False
+        try:
+            if self.database.get_message(message_id)["status"] != "sent":
+                return
+            if acknowledged:
+                message = self.database.update_message(message_id, "delivered")
+            else:
+                message = self.database.update_message(
+                    message_id, "unconfirmed", error="Подтверждение доставки не получено"
+                )
+        except KeyError:
+            return
+        await self.broadcast("message", message)
+
     async def _on_transport_event(self, event: TransportEvent) -> None:
         if event.type == "message":
             payload = event.payload
             target_type = str(payload["target_type"])
             target_id = str(payload["target_id"])
+            if target_type == "contact" and not self.database.get_contact(target_id):
+                # Firmware may report only a public-key prefix for senders missing from its table.
+                known = self.database.find_contact_by_prefix(target_id)
+                if known:
+                    target_id = str(known["id"])
             if target_type == "contact" and not self.database.get_contact(target_id):
                 contact = self.database.upsert_contact(
                     {
@@ -322,6 +389,9 @@ class StationService:
             self._state["connection_state"] = "connected" if connected else "disconnected"
             self._state["connected"] = connected
             await self.broadcast("status", self.status)
+            if not connected and not self._connecting:
+                # The link dropped (USB unplugged, BLE out of range): recover automatically.
+                self._schedule_reconnect()
         else:
             packet = self.database.add_packet_event(event.type, data=event.payload)
             await self.broadcast("packet", packet)

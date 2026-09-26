@@ -70,3 +70,7 @@ class RadioTransport(ABC):
 
     @abstractmethod
     async def export_identity(self) -> dict[str, Any]: ...
+
+    async def wait_for_ack(self, radio_id: str, timeout: float) -> bool:
+        """Wait for a delivery ACK reported after ``send_message`` returned ``ack_timeout``."""
+        return False

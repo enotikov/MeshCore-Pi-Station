@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Automatically reconnect the radio after an unexpected USB or Bluetooth disconnect; the station now owns reconnection and re-resolves the port.
+- Keep the outgoing-message queue running after unexpected errors instead of stopping silently.
+- Wait for direct-message ACKs outside the radio send lock, so queued messages are not blocked; early ACKs are not lost and pending ACKs become unconfirmed on shutdown.
+- Route messages from senders reported by key prefix to the matching known contact and merge prefix stub contacts into the full contact with their messages and packets.
+- Load message timelines in one query for chats, search and the queue.
+- Moved serial-port discovery and firmware upload writes off the async event loop.
+- Importing `meshcore_station.main` no longer creates a database; uvicorn uses the application factory.
+- Order automatic-backup retention by creation time, not the local-time filename prefix (DST safe).
+- The installer removes stale release environments, keeping the active and previous ones.
+- Release packages are no longer committed to git; download them from GitHub Releases.
+
 ## 1.0.1 — 2026-09-22
 
 - Fixed blocked OpenStreetMap tiles by allowing origin-only cross-origin referrers instead of suppressing Referer.
