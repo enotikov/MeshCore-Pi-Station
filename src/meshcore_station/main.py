@@ -116,8 +116,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "automatic_backup_failed": ("warning", "The latest automatic backup failed"),
     }
 
+    async def serial_ports() -> list[str]:
+        return await asyncio.to_thread(list_serial_ports)
+
     async def overview_payload() -> dict:
-        system = await asyncio.to_thread(system_diagnostics, settings.data_dir, list_serial_ports())
+        system = await asyncio.to_thread(system_diagnostics, settings.data_dir, await serial_ports())
         health = await asyncio.to_thread(database.health_summary)
         pending = sum(health["message_statuses"].get(value, 0) for value in ("queued", "sending", "unconfirmed"))
         codes = list(system.get("warnings", []))
@@ -218,7 +221,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "transport": pending.get("transport", settings.transport),
             "serial_port": pending.get("serial_port", settings.serial_port),
             "ble_address": pending.get("ble_address", settings.ble_address),
-            "serial_ports": list_serial_ports(),
+            "serial_ports": await serial_ports(),
             "web_username": auth_settings.web_username,
             "password_required": bootstrap,
             "https_enabled": bool(pending.get("tls_cert", settings.tls_cert) and pending.get("tls_key", settings.tls_key)),
@@ -289,7 +292,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/system/diagnostics")
     async def diagnostics():
-        return await asyncio.to_thread(system_diagnostics, settings.data_dir, list_serial_ports())
+        return await asyncio.to_thread(system_diagnostics, settings.data_dir, await serial_ports())
 
     @app.get("/api/system/overview")
     async def system_overview():
@@ -329,7 +332,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/system/support-report")
     async def support_report():
-        system = await asyncio.to_thread(system_diagnostics, settings.data_dir, list_serial_ports())
+        system = await asyncio.to_thread(system_diagnostics, settings.data_dir, await serial_ports())
         radio = station.status
         safe_radio = {key: radio.get(key) for key in (
             "connected", "connection_state", "connection_attempt", "connected_at", "mode",
@@ -375,7 +378,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             **flasher.status,
             "enabled": settings.firmware_flash_enabled,
             "auth_configured": not bootstrap,
-            "ports": list_serial_ports(),
+            "ports": await serial_ports(),
             "max_bytes": 16 * 1024 * 1024,
             "catalog_configured": bool(settings.firmware_catalog_url),
         }
@@ -449,18 +452,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             upload_dir.mkdir(parents=True, exist_ok=True)
             image_path = upload_dir / f"{uuid.uuid4().hex}.bin"
             size = 0
+            first_byte = b""
             try:
-                with image_path.open("wb") as output:
+                output = await asyncio.to_thread(image_path.open, "wb")
+                try:
                     async for chunk in request.stream():
                         size += len(chunk)
                         if size > 16 * 1024 * 1024:
                             raise HTTPException(413, "Размер прошивки превышает 16 MiB")
-                        output.write(chunk)
+                        first_byte = first_byte or chunk[:1]
+                        # Disk writes on an SD card can stall; keep them off the event loop.
+                        await asyncio.to_thread(output.write, chunk)
+                finally:
+                    await asyncio.to_thread(output.close)
                 if size < 4096:
                     raise HTTPException(400, "Файл прошивки слишком мал")
-                with image_path.open("rb") as image:
-                    if image.read(1) != b"\xe9":
-                        raise HTTPException(400, "Файл не похож на ESP32 image")
+                if first_byte != b"\xe9":
+                    raise HTTPException(400, "Файл не похож на ESP32 image")
                 flasher.start(image_path, safe_name, mode, port)
             except Exception:
                 if not flasher.status["busy"]:
@@ -930,7 +938,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+def __getattr__(name: str):
+    # Build the default application lazily so importing this module has no side effects.
+    if name == "app":
+        globals()["app"] = application = create_app()
+        return application
+    raise AttributeError(name)
 
 
 def run() -> None:
@@ -943,7 +956,8 @@ def run() -> None:
         if path and not path.is_file():
             raise RuntimeError(f"Файл TLS не найден: {path}")
     uvicorn.run(
-        "meshcore_station.main:app",
+        "meshcore_station.main:create_app",
+        factory=True,
         host=settings.host,
         port=settings.port,
         proxy_headers=False,

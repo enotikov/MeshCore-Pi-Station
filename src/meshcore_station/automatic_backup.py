@@ -106,7 +106,16 @@ class AutomaticBackupManager:
     def list(self) -> list[dict[str, Any]]:
         if not self.directory.is_dir():
             return []
-        return [self._item(path) for path in sorted(self.directory.glob("station-*.mcpsa"), reverse=True)]
+        paths = sorted(self.directory.glob("station-*.mcpsa"), key=self._age_key, reverse=True)
+        return [self._item(path) for path in paths]
+
+    @staticmethod
+    def _age_key(path: Path) -> tuple[int, str]:
+        # The local-time prefix repeats when clocks go back; order by the embedded epoch nanoseconds.
+        parts = path.stem.split("-")
+        if len(parts) >= 4 and len(parts[3]) == 20 and parts[3].isdigit():
+            return int(parts[3]), path.name
+        return path.stat().st_mtime_ns, path.name
 
     @staticmethod
     def _item(path: Path) -> dict[str, Any]:

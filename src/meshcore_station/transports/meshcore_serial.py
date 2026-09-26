@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import glob
 import logging
 import time
@@ -54,6 +55,8 @@ class MeshCoreSerialTransport(RadioTransport):
         self._handler: EventHandler | None = None
         self._subscriptions: list[Any] = []
         self._device: dict[str, Any] = {}
+        self._ack_waiters: dict[str, asyncio.Future[bool]] = {}
+        self._early_acks: dict[str, float] = {}
 
     @property
     def status(self) -> dict[str, Any]:
@@ -68,15 +71,17 @@ class MeshCoreSerialTransport(RadioTransport):
     async def start(self, handler: EventHandler) -> None:
         from meshcore import EventType, MeshCore
 
+        # A previous session must be released before the port can be reopened.
+        await self.stop()
         self._handler = handler
+        # StationService owns reconnection so that the port is re-resolved and state stays consistent.
         if self._mode == "serial":
             self._port = resolve_serial_port(self._configured_port)
             self._mc = await MeshCore.create_serial(
                 self._port,
                 self._baud,
                 debug=self._debug,
-                auto_reconnect=True,
-                max_reconnect_attempts=0,
+                auto_reconnect=False,
             )
         else:
             address = None if self._configured_port.lower() in {"", "auto"} else self._configured_port
@@ -85,8 +90,7 @@ class MeshCoreSerialTransport(RadioTransport):
                 address=address,
                 pin=self._ble_pin or None,
                 debug=self._debug,
-                auto_reconnect=True,
-                max_reconnect_attempts=0,
+                auto_reconnect=False,
             )
         if self._mc is None:
             raise RuntimeError(f"Нет ответа MeshCore Companion на {self._port}")
@@ -139,6 +143,7 @@ class MeshCoreSerialTransport(RadioTransport):
             self._mc.subscribe(EventType.CONTACT_MSG_RECV, on_private),
             self._mc.subscribe(EventType.CHANNEL_MSG_RECV, on_channel),
             self._mc.subscribe(EventType.ADVERTISEMENT, on_advert),
+            self._mc.subscribe(EventType.ACK, self._on_ack),
             self._mc.subscribe(EventType.CONNECTED, on_connection),
             self._mc.subscribe(EventType.DISCONNECTED, on_connection),
             self._mc.subscribe(EventType.TRACE_DATA, on_diagnostic),
@@ -157,14 +162,21 @@ class MeshCoreSerialTransport(RadioTransport):
         await handler(TransportEvent("status", self.status))
 
     async def stop(self) -> None:
-        if not self._mc:
+        for waiter in self._ack_waiters.values():
+            if not waiter.done():
+                waiter.set_result(False)
+        self._ack_waiters.clear()
+        self._early_acks.clear()
+        mc, self._mc = self._mc, None
+        if not mc:
             return
-        for subscription in self._subscriptions:
-            self._mc.unsubscribe(subscription)
-        self._subscriptions.clear()
-        await self._mc.stop_auto_message_fetching()
-        await self._mc.disconnect()
-        self._mc = None
+        try:
+            for subscription in self._subscriptions:
+                mc.unsubscribe(subscription)
+            self._subscriptions.clear()
+            await mc.stop_auto_message_fetching()
+        finally:
+            await mc.disconnect()
 
     @staticmethod
     def _normalise_contact(contact_id: str, contact: dict[str, Any]) -> dict[str, Any]:
@@ -242,12 +254,42 @@ class MeshCoreSerialTransport(RadioTransport):
         contact = self._mc.get_contact_by_key_prefix(target_id)
         if contact is None:
             raise RuntimeError("Контакт не найден в памяти модема")
-        result = await self._mc.commands.send_msg_with_retry(contact, text, max_attempts=1)
+        result = await self._mc.commands.send_msg(contact, text)
         if result is None or result.type == EventType.ERROR:
-            return {"radio_id": None, "status": "unconfirmed"}
+            reason = result.payload.get("reason") if result and isinstance(result.payload, dict) else None
+            raise RuntimeError(str(reason or "Модем отклонил сообщение"))
         expected = result.payload.get("expected_ack", b"")
         radio_id = expected.hex() if hasattr(expected, "hex") else str(expected)
-        return {"radio_id": radio_id, "status": "delivered"}
+        timeout = float(result.payload.get("suggested_timeout") or 10000) / 1000 * 1.2
+        # The ACK is awaited by the caller without holding the radio send lock.
+        return {"radio_id": radio_id, "status": "sent", "ack_timeout": max(timeout, 5.0)}
+
+    async def _on_ack(self, event: Any) -> None:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        code = payload.get("code", "")
+        code = code.hex() if hasattr(code, "hex") else str(code)
+        waiter = self._ack_waiters.get(code)
+        if waiter and not waiter.done():
+            waiter.set_result(True)
+            return
+        # The ACK can arrive before the waiter is registered.
+        now = time.monotonic()
+        self._early_acks = {key: seen for key, seen in self._early_acks.items() if now - seen < 300}
+        if len(self._early_acks) < 1024:
+            self._early_acks[code] = now
+
+    async def wait_for_ack(self, radio_id: str, timeout: float) -> bool:
+        if self._early_acks.pop(radio_id, None) is not None:
+            return True
+        waiter = asyncio.get_running_loop().create_future()
+        self._ack_waiters[radio_id] = waiter
+        try:
+            return await asyncio.wait_for(waiter, timeout)
+        except TimeoutError:
+            return False
+        finally:
+            if self._ack_waiters.get(radio_id) is waiter:
+                del self._ack_waiters[radio_id]
 
     async def send_advert(self, flood: bool) -> None:
         from meshcore import EventType

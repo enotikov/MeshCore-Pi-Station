@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -9,6 +10,8 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 from typing import Any
+
+_HEX = re.compile(r"(?:[0-9a-f]{2})+")
 
 
 class Database:
@@ -180,7 +183,45 @@ class Database:
                 """,
                 payload,
             )
+            self._merge_prefix_contacts(contact_id)
         return self.get_contact(contact_id) or payload
+
+    def _merge_prefix_contacts(self, contact_id: str) -> None:
+        """Fold stub contacts keyed by a public-key prefix into the full contact."""
+        if len(contact_id) != 64 or not _HEX.fullmatch(contact_id):
+            return
+        stubs = self._connection.execute(
+            "SELECT * FROM contacts WHERE length(id) < length(?) AND substr(?, 1, length(id)) = id",
+            (contact_id, contact_id),
+        ).fetchall()
+        for stub in stubs:
+            stub_id = str(stub["id"])
+            if not _HEX.fullmatch(stub_id):
+                continue
+            self._connection.execute(
+                "UPDATE messages SET target_id=? WHERE target_type='contact' AND target_id=?",
+                (contact_id, stub_id),
+            )
+            self._connection.execute(
+                "UPDATE packet_events SET contact_id=? WHERE contact_id=?", (contact_id, stub_id)
+            )
+            self._connection.execute(
+                """UPDATE contacts SET unread=unread+?, favorite=MAX(favorite, ?), blocked=MAX(blocked, ?),
+                   notes=CASE WHEN notes='' THEN ? ELSE notes END WHERE id=?""",
+                (stub["unread"], stub["favorite"], stub["blocked"], stub["notes"], contact_id),
+            )
+            self._connection.execute("DELETE FROM contacts WHERE id=?", (stub_id,))
+
+    def find_contact_by_prefix(self, prefix: str) -> dict[str, Any] | None:
+        """Return the only known contact whose id starts with ``prefix``."""
+        if not prefix or len(prefix) >= 64 or not _HEX.fullmatch(prefix):
+            return None
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM contacts WHERE length(id) > length(?) AND substr(id, 1, length(?)) = ? LIMIT 2",
+                (prefix, prefix, prefix),
+            ).fetchall()
+        return self._contact_row(rows[0]) if len(rows) == 1 else None
 
     def get_contact(self, contact_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -325,6 +366,29 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def _message_rows(self, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        """Decode message rows and attach their timelines with one query."""
+        ids = [int(row["id"]) for row in rows]
+        timelines: dict[int, list[dict[str, Any]]] = {}
+        if ids:
+            with self._lock:
+                events = self._connection.execute(
+                    "SELECT message_id, status, created_at, detail FROM message_status_events "
+                    f"WHERE message_id IN ({','.join('?' * len(ids))}) ORDER BY message_id, id",
+                    ids,
+                ).fetchall()
+            for event in events:
+                timelines.setdefault(int(event["message_id"]), []).append(
+                    {"status": event["status"], "created_at": event["created_at"], "detail": event["detail"]}
+                )
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = json.loads(item.pop("metadata_json"))
+            item["timeline"] = timelines.get(int(item["id"]), [])
+            result.append(item)
+        return result
+
     def reset_message_deadline(self, message_id: int, ttl_seconds: int = 86400) -> None:
         with self._lock, self._connection:
             self._connection.execute(
@@ -343,10 +407,10 @@ class Database:
     def queued_messages(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT id FROM messages WHERE direction='out' AND status='queued' ORDER BY id LIMIT ?",
+                "SELECT * FROM messages WHERE direction='out' AND status='queued' ORDER BY id LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [self.get_message(int(row["id"])) for row in rows]
+        return self._message_rows(rows)
 
     def list_messages(self, target_type: str, target_id: str, limit: int = 200) -> list[dict[str, Any]]:
         with self._lock:
@@ -360,13 +424,7 @@ class Database:
                 """,
                 (target_type, str(target_id), limit),
             ).fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            item["metadata"] = json.loads(item.pop("metadata_json"))
-            item["timeline"] = self.message_timeline(int(item["id"]))
-            result.append(item)
-        return result
+        return self._message_rows(rows)
 
     def mark_read(self, contact_id: str) -> None:
         with self._lock, self._connection:
@@ -757,13 +815,7 @@ class Database:
                 WHERE {' AND '.join(clauses)} ORDER BY m.created_at DESC, m.id DESC LIMIT ?""",
                 parameters,
             ).fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            item["metadata"] = json.loads(item.pop("metadata_json"))
-            item["timeline"] = self.message_timeline(int(item["id"]))
-            result.append(item)
-        return result
+        return self._message_rows(rows)
 
     def health_summary(self) -> dict[str, Any]:
         with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as snapshot:
